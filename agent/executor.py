@@ -11,11 +11,9 @@ import time
 from typing import Any, Optional
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .planner import Step
 from .tools import ToolRegistry, ToolResult
-from agent.tools import FileProcessorTool
 
 
 
@@ -108,7 +106,6 @@ class StepExecutor:
     def __init__(self, llm_cfg: dict, tools: ToolRegistry, retry_limit: int = 3):
         self._cfg = llm_cfg
         self._tools = tools
-        self._file_processor = FileProcessorTool
         self._retry_limit = retry_limit
         self._base_url = llm_cfg.get("base_url", "https://app.covenant.sbs/v1")
         self._model = llm_cfg.get("model", "deepseek")

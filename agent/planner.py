@@ -126,8 +126,8 @@ class Planner:
     def __init__(self, llm_cfg: dict, tool_schema: str):
         self._cfg = llm_cfg
         self._tool_schema = tool_schema
-        self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "anthropic/claude-sonnet-4-6")
+        self._base_url = llm_cfg.get("base_url", "https://app.covenant.sbs/v1")
+        self._model = llm_cfg.get("model", "deepseek")
         self._api_key = llm_cfg.get("api_key", "")
 
     async def decompose(self, task: str) -> Plan:
@@ -136,22 +136,17 @@ class Planner:
         return self._parse_plan(task, raw)
 
     async def _call_llm(self, prompt: str) -> str:
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-            "X-Title": "GazccThinking-Planner",
-        }
-        body = {
-            "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 2000,
-            "temperature": 0.05,
-        }
+        # Covenant API: GET https://api.covenant.sbs/api/ai/blackbox?question=...
+        params = {"question": prompt, "model": self._model}
+        headers = {"x-api-key": self._api_key}
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(f"{self._base_url}/chat/completions", json=body, headers=headers)
+            resp = await client.get(self._base_url, params=params, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            # Covenant returns: { status: true, result: "..." }
+            if isinstance(data, dict):
+                return data.get("result") or data.get("response") or data.get("message") or str(data)
+            return str(data)
 
     def _parse_plan(self, task: str, raw: str) -> Plan:
         # Strip markdown fences if present

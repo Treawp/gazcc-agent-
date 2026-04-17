@@ -98,6 +98,17 @@ class TaskStatus(BaseModel):
     steps_total: int = 0
 
 
+class SandboxRequest(BaseModel):
+    message: str
+    session_id: str | None = None
+    history: list[dict] = []
+    memory: dict = {}
+
+
+# Sandbox session store (history + memory per session)
+_sandbox_sessions: dict[str, dict] = {}
+
+
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
 async def _sse_gen(task: str, task_id: str) -> AsyncIterator[str]:
@@ -166,11 +177,14 @@ async def root():
         "version": "1.0.0",
         "status": "online",
         "endpoints": {
-            "POST /api/run":         "Stream task events (SSE)",
-            "POST /api/task":        "Submit task, get task_id",
-            "GET /api/task/{id}":    "Poll task status",
-            "GET /api/memory":       "List memory entries",
-            "GET /api/tools":        "List available tools",
+            "POST /api/run":            "Stream task events (SSE)",
+            "POST /api/task":           "Submit task, get task_id",
+            "GET /api/task/{id}":       "Poll task status",
+            "GET /api/memory":          "List memory entries",
+            "GET /api/tools":           "List available tools",
+            "POST /api/sandbox":        "Sandbox Executor — chat with code agent (SSE)",
+            "POST /api/sandbox/reset":  "Reset sandbox session",
+            "GET /api/sandbox/{id}":    "Get sandbox session state",
         },
     })
 
@@ -244,6 +258,98 @@ async def list_tools():
     from agent.tools import ToolRegistry
     reg = ToolRegistry(CFG)
     return {"tools": reg.list_all()}
+
+
+# ── Sandbox Executor endpoints ────────────────────────────────────────────────
+
+async def _sandbox_sse(session_id: str, message: str, history: list, memory: dict) -> AsyncIterator[str]:
+    """SSE generator for sandbox chat."""
+    from agent.sandbox import SandboxExecutor
+
+    executor = SandboxExecutor(CFG)
+    executor.load_state(history, memory)
+
+    try:
+        async for event in executor.chat(message):
+            ev_dict = event.to_dict()
+
+            # Keep session state up-to-date on each turn
+            if event.type == "response":
+                _sandbox_sessions[session_id] = {
+                    "history": executor.history,
+                    "memory": executor.memory,
+                }
+
+            yield f"data: {json.dumps(ev_dict, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0)
+
+    except Exception as e:
+        err = {"type": "error", "data": {"msg": str(e)}, "timestamp": time.time()}
+        yield f"data: {json.dumps(err)}\n\n"
+    finally:
+        yield "data: [DONE]\n\n"
+
+
+@app.post("/api/sandbox")
+async def sandbox_chat(req: SandboxRequest):
+    """
+    Send a message to the Sandbox Executor and receive an SSE stream of events.
+
+    Pass session_id to continue a previous session, or omit to start fresh.
+    Each event: data: {"type": "...", "data": {...}, "timestamp": ...}
+    Types: thinking | tool_call | tool_result | memory | response | error
+    Final event: data: [DONE]
+    """
+    if not req.message.strip():
+        raise HTTPException(400, "message cannot be empty")
+    api_key = CFG.get("llm", {}).get("api_key", "")
+    if not api_key:
+        raise HTTPException(500, "COVENANT_API_KEY not configured")
+
+    session_id = req.session_id or str(uuid.uuid4())[:8]
+
+    # Restore session if it exists, otherwise use history/memory from request body
+    if session_id in _sandbox_sessions:
+        session = _sandbox_sessions[session_id]
+        history = session["history"]
+        memory = session["memory"]
+    else:
+        history = req.history
+        memory = req.memory
+        _sandbox_sessions[session_id] = {"history": history, "memory": memory}
+
+    return StreamingResponse(
+        _sandbox_sse(session_id, req.message, history, memory),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Session-Id": session_id,
+        },
+    )
+
+
+@app.post("/api/sandbox/reset")
+async def sandbox_reset(session_id: str = Query(..., description="Session ID to reset")):
+    """Clear conversation history and memory for a sandbox session."""
+    if session_id in _sandbox_sessions:
+        del _sandbox_sessions[session_id]
+        return {"status": "reset", "session_id": session_id}
+    return {"status": "not_found", "session_id": session_id}
+
+
+@app.get("/api/sandbox/{session_id}")
+async def sandbox_state(session_id: str):
+    """Get current history and memory for a sandbox session."""
+    session = _sandbox_sessions.get(session_id)
+    if session is None:
+        raise HTTPException(404, f"Session '{session_id}' not found")
+    return {
+        "session_id": session_id,
+        "turns": len(session["history"]) // 2,
+        "memory": session["memory"],
+        "history_length": len(session["history"]),
+    }
 
 
 # ── demo UI ───────────────────────────────────────────────────────────────────

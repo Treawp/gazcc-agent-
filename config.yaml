@@ -1,21 +1,21 @@
 llm:
-  provider: openrouter
-  base_url: https://openrouter.ai/api/v1
-  model: anthropic/claude-sonnet-4-6
-  api_key: ${OPENROUTER_API_KEY}
+  provider: covenant
+  base_url: https://api.covenant.sbs/api/ai/blackbox
+  model: deepseek
+  api_key: ${COVENANT_API_KEY}
   max_tokens: 4000
   temperature: 0.1
 
 agent:
   name: GazccThinking
   max_iterations: 20
-  timeout: 900          # Vercel Pro max (seconds)
+  timeout: 900
   checkpoint_interval: 3
   retry_limit: 3
   retry_delay: 2.0
 
 memory:
-  backend: redis        # 'redis' for Vercel | 'file' for local
+  backend: redis
   file_path: /tmp/gazcc_memory
   max_entries: 500
   similarity_threshold: 0.3
@@ -24,10 +24,10 @@ tools:
   web_search: true
   fetch_url: true
   file_ops: true
-  code_exec: true       # set false on Vercel for safety
+  code_exec: false
   code_exec_timeout: 15
 
 vercel:
   redis_url: ${UPSTASH_REDIS_REST_URL}
   redis_token: ${UPSTASH_REDIS_REST_TOKEN}
-  task_ttl: 86400       # task state TTL in Redis (24h)
+  task_ttl: 86400

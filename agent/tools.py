@@ -255,10 +255,12 @@ class ExecuteCodeTool(BaseTool):
 
     # Only allow when explicitly enabled in config
     ENABLED: bool = True
+    TIMEOUT: int = 15
 
-    async def run(self, code: str, timeout: int = 15) -> ToolResult:
+    async def run(self, code: str, timeout: int = None) -> ToolResult:
         if not self.ENABLED:
             return ToolResult(False, "Code execution disabled in this environment.")
+        timeout = timeout if timeout is not None else self.TIMEOUT
         try:
             with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as tmp:
                 tmp.write(code)

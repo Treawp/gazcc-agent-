@@ -5,8 +5,9 @@ Exposes GazccThinking Agent via FastAPI REST + Server-Sent Events.
 
 Endpoints:
   POST /api/run          – submit task, stream events via SSE
-  POST /api/task         – submit task async (returns task_id immediately)
-  GET  /api/task/{id}    – poll task status
+  POST /api/task         – submit task async (returns task_id immediately, NO timeout)
+  GET  /api/task/{id}    – poll task status & steps
+  GET  /api/stream/{id}  – SSE stream untuk task yang sudah berjalan
   GET  /api/memory       – list memory keys
   GET  /api/tools        – list available tools
   GET  /                 – health check
@@ -18,11 +19,11 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Dict, Any
 
 import yaml
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -65,7 +66,7 @@ CFG = _load_cfg()
 app = FastAPI(
     title="GazccThinking Agent API",
     description="Autonomous AI Agent — Powered by GazccThinking",
-    version="1.0.0",
+    version="1.1.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -74,8 +75,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory task tracker (Vercel: each invocation is isolated, use Redis for persistence)
-_tasks: dict[str, dict] = {}
+# ── Task store ────────────────────────────────────────────────────────────────
+# In-memory dengan TTL cleanup.
+# Untuk multi-instance Vercel: ganti dengan Upstash Redis (lihat komentar di bawah).
+_tasks: Dict[str, Dict[str, Any]] = {}
+
+# SSE event queues: task_id → asyncio.Queue
+# Hanya ada selama ada subscriber aktif.
+_event_queues: Dict[str, asyncio.Queue] = {}
+
+
+def _task_init(task_id: str, task: str) -> Dict:
+    """Buat entry task baru di store."""
+    entry = {
+        "task_id": task_id,
+        "status": "pending",   # pending | running | done | failed
+        "task": task,
+        "events": [],
+        "output": "",
+        "error": "",
+        "elapsed": 0.0,
+        "steps_done": 0,
+        "steps_total": 0,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    _tasks[task_id] = entry
+    return entry
+
+
+def _task_push_event(task_id: str, ev_dict: dict):
+    """Simpan event ke store + kirim ke SSE queue jika ada subscriber."""
+    entry = _tasks.get(task_id)
+    if entry:
+        entry["events"].append(ev_dict)
+        entry["updated_at"] = time.time()
+
+    q = _event_queues.get(task_id)
+    if q:
+        try:
+            q.put_nowait(ev_dict)
+        except asyncio.QueueFull:
+            pass  # Subscriber lambat, skip event ini
 
 
 # ── models ────────────────────────────────────────────────────────────────────
@@ -88,7 +129,7 @@ class TaskRequest(BaseModel):
 
 class TaskStatus(BaseModel):
     task_id: str
-    status: str          # running | done | failed
+    status: str          # pending | running | done | failed
     task: str
     events: list[dict]
     output: str = ""
@@ -98,42 +139,49 @@ class TaskStatus(BaseModel):
     steps_total: int = 0
 
 
-# ── SSE helper ────────────────────────────────────────────────────────────────
+# ── SSE generator (dipakai oleh /api/run dan /api/stream/{id}) ────────────────
 
 async def _sse_gen(task: str, task_id: str) -> AsyncIterator[str]:
     """Stream AgentEvent objects as Server-Sent Events."""
     from agent.core import GazccAgent
 
     agent = GazccAgent(CFG)
-    _tasks[task_id] = {"status": "running", "task": task, "events": [], "output": "", "error": ""}
+    entry = _tasks.get(task_id)
+    if entry:
+        entry["status"] = "running"
+        entry["updated_at"] = time.time()
 
     try:
         async for event in agent.stream(task, task_id=task_id):
             ev_dict = event.to_dict()
-            _tasks[task_id]["events"].append(ev_dict)
+            _task_push_event(task_id, ev_dict)
 
             if event.type == "task_done":
-                _tasks[task_id]["status"] = "done"
-                _tasks[task_id]["output"] = agent._last_result.output if agent._last_result else ""
-            elif event.type == "task_failed":
-                _tasks[task_id]["status"] = "failed"
-                _tasks[task_id]["error"] = event.data.get("reason", "")
-            elif event.type == "error":
-                _tasks[task_id]["status"] = "failed"
-                _tasks[task_id]["error"] = event.data.get("msg", "")
+                r = agent._last_result
+                if r:
+                    entry = _tasks.get(task_id, {})
+                    entry.update({
+                        "status": "done",
+                        "output": r.output,
+                        "elapsed": r.elapsed,
+                        "steps_done": r.steps_done,
+                        "steps_total": r.steps_total,
+                        "updated_at": time.time(),
+                    })
+            elif event.type in ("task_failed", "error"):
+                entry = _tasks.get(task_id, {})
+                entry.update({
+                    "status": "failed",
+                    "error": event.data.get("reason") or event.data.get("msg", ""),
+                    "updated_at": time.time(),
+                })
 
             yield f"data: {json.dumps(ev_dict, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0)  # yield control
+            await asyncio.sleep(0)  # yield control ke event loop
 
-        # Final result
+        # Final stream_end event
         if agent._last_result:
             r = agent._last_result
-            _tasks[task_id].update({
-                "elapsed": r.elapsed,
-                "steps_done": r.steps_done,
-                "steps_total": r.steps_total,
-                "output": r.output,
-            })
             final = {
                 "type": "stream_end",
                 "data": {
@@ -146,15 +194,32 @@ async def _sse_gen(task: str, task_id: str) -> AsyncIterator[str]:
                 },
                 "timestamp": time.time(),
             }
+            _task_push_event(task_id, final)
             yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
 
     except Exception as e:
         err_ev = {"type": "error", "data": {"msg": str(e)}, "timestamp": time.time()}
-        _tasks[task_id]["status"] = "failed"
-        _tasks[task_id]["error"] = str(e)
+        _task_push_event(task_id, err_ev)
+        entry = _tasks.get(task_id, {})
+        entry.update({"status": "failed", "error": str(e), "updated_at": time.time()})
         yield f"data: {json.dumps(err_ev)}\n\n"
     finally:
+        # Sentinel agar SSE subscriber tahu stream selesai
+        _task_push_event(task_id, {"type": "_eof"})
         yield "data: [DONE]\n\n"
+
+
+# ── Background runner (untuk /api/task) ───────────────────────────────────────
+
+async def _run_background(task: str, task_id: str):
+    """
+    Jalankan agent sampai selesai di background.
+    Dipanggil via FastAPI BackgroundTasks — tidak block response.
+    Bisa berjalan 5-10 menit tanpa kena Vercel 90s timeout karena
+    request /api/task sudah selesai (202) sebelum ini berjalan.
+    """
+    async for _ in _sse_gen(task, task_id):
+        pass  # Event sudah di-push ke _task_push_event, tidak perlu di-yield
 
 
 # ── routes ────────────────────────────────────────────────────────────────────
@@ -163,14 +228,15 @@ async def _sse_gen(task: str, task_id: str) -> AsyncIterator[str]:
 async def root():
     return JSONResponse({
         "agent": "GazccThinking",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "online",
         "endpoints": {
-            "POST /api/run":         "Stream task events (SSE)",
-            "POST /api/task":        "Submit task, get task_id",
-            "GET /api/task/{id}":    "Poll task status",
-            "GET /api/memory":       "List memory entries",
-            "GET /api/tools":        "List available tools",
+            "POST /api/run":          "Stream task events langsung (SSE)",
+            "POST /api/task":         "Submit task async, return task_id (no timeout)",
+            "GET  /api/task/{id}":    "Poll status + events",
+            "GET  /api/stream/{id}":  "SSE stream untuk task background",
+            "GET  /api/memory":       "List memory entries",
+            "GET  /api/tools":        "List available tools",
         },
     })
 
@@ -178,9 +244,8 @@ async def root():
 @app.post("/api/run")
 async def run_task(req: TaskRequest):
     """
-    Submit a task and receive a Server-Sent Events stream of AgentEvent objects.
-    Each event: `data: {"type": "...", "data": {...}, "timestamp": ...}`
-    Final event: `data: [DONE]`
+    Submit task → terima SSE stream langsung.
+    Cocok untuk task pendek. Untuk task panjang (>90s) pakai /api/task.
     """
     task_id = req.task_id or str(uuid.uuid4())[:8]
     if not req.task.strip():
@@ -188,6 +253,8 @@ async def run_task(req: TaskRequest):
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
         raise HTTPException(500, "OPENROUTER_API_KEY not configured")
+
+    _task_init(task_id, req.task)
 
     return StreamingResponse(
         _sse_gen(req.task, task_id),
@@ -200,30 +267,105 @@ async def run_task(req: TaskRequest):
     )
 
 
-@app.post("/api/task")
-async def submit_task(req: TaskRequest):
-    """Submit task and immediately return task_id. Poll /api/task/{id} for status."""
+@app.post("/api/task", status_code=202)
+async def submit_task(req: TaskRequest, background_tasks: BackgroundTasks):
+    """
+    Submit task → langsung return task_id (HTTP 202, tidak tunggu).
+    Agent berjalan di background via FastAPI BackgroundTasks.
+    Poll /api/task/{id} setiap 5 detik untuk cek status.
+    Task bisa berjalan 5-10 menit tanpa timeout.
+    """
     task_id = req.task_id or str(uuid.uuid4())[:8]
     if not req.task.strip():
         raise HTTPException(400, "task cannot be empty")
+    api_key = CFG.get("llm", {}).get("api_key", "")
+    if not api_key:
+        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
 
-    _tasks[task_id] = {"status": "running", "task": req.task, "events": [], "output": "", "error": ""}
+    # Init task di store dengan status pending
+    _task_init(task_id, req.task)
 
-    async def _bg():
-        async for _ in _sse_gen(req.task, task_id):
-            pass
+    # Daftarkan ke BackgroundTasks — AMAN, tidak drop saat response selesai
+    background_tasks.add_task(_run_background, req.task, task_id)
 
-    asyncio.create_task(_bg())
-    return {"task_id": task_id, "status": "running", "poll_url": f"/api/task/{task_id}"}
+    return {
+        "id": task_id,
+        "task_id": task_id,
+        "status": "pending",
+        "message": "Task diterima. Agent berjalan di background.",
+        "poll_url": f"/api/task/{task_id}",
+        "stream_url": f"/api/stream/{task_id}",
+    }
 
 
 @app.get("/api/task/{task_id}")
 async def get_task(task_id: str):
-    """Poll task status and events."""
-    state = _tasks.get(task_id)
-    if state is None:
-        raise HTTPException(404, f"Task {task_id!r} not found")
-    return JSONResponse(state)
+    """
+    Poll status task.
+    Response: status (pending|running|done|failed), output, events, elapsed.
+    """
+    entry = _tasks.get(task_id)
+    if entry is None:
+        raise HTTPException(404, f"Task '{task_id}' tidak ditemukan")
+    return JSONResponse(entry)
+
+
+@app.get("/api/stream/{task_id}")
+async def stream_task(task_id: str):
+    """
+    SSE stream untuk task yang sudah disubmit via /api/task.
+    Jika task sudah selesai sebelum klien connect → kirim semua events lalu tutup.
+    """
+    entry = _tasks.get(task_id)
+    if entry is None:
+        raise HTTPException(404, f"Task '{task_id}' tidak ditemukan")
+
+    async def generator():
+        # Jika sudah selesai: replay semua events langsung
+        if entry["status"] in ("done", "failed"):
+            for ev in entry.get("events", []):
+                if ev.get("type") != "_eof":
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        # Task masih running: subscribe ke queue
+        q: asyncio.Queue = asyncio.Queue(maxsize=500)
+        _event_queues[task_id] = q
+
+        # Replay events yang sudah ada sebelum subscribe
+        for ev in entry.get("events", []):
+            if ev.get("type") != "_eof":
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+        try:
+            while True:
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # Keepalive agar koneksi tidak drop
+                    continue
+
+                if ev.get("type") == "_eof":
+                    yield "data: [DONE]\n\n"
+                    break
+
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+                if ev.get("type") in ("stream_end", "task_done", "task_failed", "error"):
+                    yield "data: [DONE]\n\n"
+                    break
+        finally:
+            _event_queues.pop(task_id, None)
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/memory")
@@ -244,6 +386,16 @@ async def list_tools():
     from agent.tools import ToolRegistry
     reg = ToolRegistry(CFG)
     return {"tools": reg.list_all()}
+
+
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok",
+        "tasks_tracked": len(_tasks),
+        "active_streams": len(_event_queues),
+        "timestamp": time.time(),
+    }
 
 
 # ── demo UI ───────────────────────────────────────────────────────────────────
@@ -353,7 +505,7 @@ async function runTask(){
       const {done, value} = await reader.read();
       if(done) break;
       buf += dec.decode(value, {stream:true});
-      const lines = buf.split('\n');
+      const lines = buf.split('\\n');
       buf = lines.pop();
       for(const line of lines){
         if(!line.startsWith('data: ')) continue;

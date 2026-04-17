@@ -107,7 +107,6 @@ class GazccAgent:
     async def run(self, task: str, task_id: str | None = None) -> AgentResult:
         """Run task to completion, block until done."""
         task_id = task_id or str(uuid.uuid4())[:8]
-        result = None
         async for _ in self._run_gen(task, task_id):
             pass
         return self._last_result
@@ -267,10 +266,14 @@ class GazccAgent:
                     elapsed=elapsed, events=list(self._events),
                 )
                 yield self._emit("task_done", {
+                    "type": "task_done",
+                    "status": "done",
                     "task_id": task_id,
                     "steps_done": len(done_steps),
+                    "steps_total": len(plan.steps),
                     "elapsed": round(elapsed, 2),
                     "output_preview": final_output[:400],
+                    "output": final_output,
                 })
             else:
                 failed = [s for s in plan.steps if s.status == "failed"]
@@ -281,7 +284,13 @@ class GazccAgent:
                     steps_done=len(done_steps), steps_total=len(plan.steps),
                     elapsed=elapsed, events=list(self._events), error=err_msg,
                 )
-                yield self._emit("task_failed", {"task_id": task_id, "reason": err_msg, "elapsed": round(elapsed, 2)})
+                yield self._emit("task_failed", {
+                    "type": "task_failed",
+                    "status": "failed",
+                    "task_id": task_id,
+                    "reason": err_msg,
+                    "elapsed": round(elapsed, 2),
+                })
 
         except Exception as e:
             logger.exception("Agent crashed")
@@ -291,7 +300,12 @@ class GazccAgent:
                 output="", steps_done=0, steps_total=0,
                 elapsed=elapsed, error=str(e),
             )
-            yield self._emit("error", {"msg": str(e), "task_id": task_id})
+            yield self._emit("error", {
+                "type": "error",
+                "status": "failed",
+                "msg": str(e),
+                "task_id": task_id,
+            })
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

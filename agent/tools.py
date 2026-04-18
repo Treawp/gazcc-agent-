@@ -744,6 +744,909 @@ class DiffPatchTool(BaseTool):
         return result
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── BATCH 2 — 20 NEW TOOLS ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+
+import difflib as _difflib
+import glob as _glob
+import gzip as _gzip
+import hashlib as _hashlib
+import random as _random
+import shutil as _shutil
+import string as _string
+import xml.etree.ElementTree as _ET
+import zlib as _zlib
+from base64 import b64decode as _b64decode, b64encode as _b64encode
+from csv import DictReader as _DictReader, DictWriter as _DictWriter
+from io import StringIO as _StringIO
+
+
+# ── 1. shell_exec ─────────────────────────────────────────────────────────────
+
+class ShellExecTool(BaseTool):
+    name = "shell_exec"
+    description = (
+        "Run a shell (bash) command and return stdout + stderr. "
+        "Timeout enforced. Use for git ops, package installs, build commands, "
+        "file manipulation — anything Python subprocess can do."
+    )
+    parameters = "command: str, timeout: int = 20, cwd: str = None"
+
+    BLOCKED = ("rm -rf /", "mkfs", ":(){:|:&};:", "dd if=/dev/zero")
+
+    async def run(self, command: str, timeout: int = 20, cwd: str = None) -> ToolResult:
+        for blocked in self.BLOCKED:
+            if blocked in command:
+                return ToolResult(False, f"Blocked dangerous command: {blocked}")
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd or None,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return ToolResult(False, f"shell_exec timed out after {timeout}s")
+            out = stdout.decode(errors="replace").strip()
+            err = stderr.decode(errors="replace").strip()
+            combined = "\n".join(filter(None, [out, err]))
+            ok = proc.returncode == 0
+            return ToolResult(ok, combined or "(no output)", {"returncode": proc.returncode, "command": command})
+        except Exception as e:
+            return ToolResult(False, f"shell_exec error: {e}")
+
+
+# ── 2. grep_search ────────────────────────────────────────────────────────────
+
+class GrepSearchTool(BaseTool):
+    name = "grep_search"
+    description = (
+        "Search for a regex pattern across files in a directory (recursive). "
+        "Returns matching lines with file path and line number. "
+        "Use to locate functions, variables, error strings, or any pattern in a codebase."
+    )
+    parameters = "pattern: str, path: str = '.', file_glob: str = '*', max_matches: int = 50"
+
+    async def run(self, pattern: str, path: str = ".", file_glob: str = "*", max_matches: int = 50) -> ToolResult:
+        import re
+        try:
+            rx = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return ToolResult(False, f"Invalid regex: {e}")
+        results = []
+        base = Path(path)
+        if not base.exists():
+            return ToolResult(False, f"Path not found: {path}")
+        for fp in sorted(base.rglob(file_glob)):
+            if not fp.is_file():
+                continue
+            try:
+                lines = fp.read_text(errors="replace").splitlines()
+                for i, line in enumerate(lines, 1):
+                    if rx.search(line):
+                        results.append(f"{fp}:{i}: {line.strip()}")
+                        if len(results) >= max_matches:
+                            results.append(f"... (limit {max_matches} reached)")
+                            break
+            except Exception:
+                continue
+            if len(results) >= max_matches:
+                break
+        if not results:
+            return ToolResult(False, f"No matches for '{pattern}' in {path}")
+        return ToolResult(True, "\n".join(results), {"matches": len(results), "pattern": pattern})
+
+
+# ── 3. find_files ─────────────────────────────────────────────────────────────
+
+class FindFilesTool(BaseTool):
+    name = "find_files"
+    description = (
+        "Find files matching a glob pattern recursively in a directory. "
+        "Returns paths with size and modification time. "
+        "Use to locate specific files, list by extension, or explore project structure."
+    )
+    parameters = "pattern: str, base_path: str = '.', max_results: int = 100"
+
+    async def run(self, pattern: str, base_path: str = ".", max_results: int = 100) -> ToolResult:
+        import datetime
+        base = Path(base_path)
+        if not base.exists():
+            return ToolResult(False, f"Path not found: {base_path}")
+        try:
+            matches = sorted(base.rglob(pattern))[:max_results]
+            if not matches:
+                return ToolResult(False, f"No files matching '{pattern}' in {base_path}")
+            lines = []
+            for p in matches:
+                stat = p.stat()
+                mt = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                size = stat.st_size
+                lines.append(f"{p}  ({size}B, {mt})")
+            return ToolResult(True, "\n".join(lines), {"count": len(matches), "pattern": pattern})
+        except Exception as e:
+            return ToolResult(False, f"find_files error: {e}")
+
+
+# ── 4. copy_file ──────────────────────────────────────────────────────────────
+
+class CopyFileTool(BaseTool):
+    name = "copy_file"
+    description = (
+        "Copy a file or directory to a destination path. "
+        "Creates parent directories as needed. "
+        "Use to duplicate files, create backups before editing, or stage output."
+    )
+    parameters = "src: str, dst: str, overwrite: bool = True"
+
+    async def run(self, src: str, dst: str, overwrite: bool = True) -> ToolResult:
+        try:
+            s = Path(src)
+            d = Path(dst)
+            if not s.exists():
+                return ToolResult(False, f"Source not found: {src}")
+            d.parent.mkdir(parents=True, exist_ok=True)
+            if d.exists() and not overwrite:
+                return ToolResult(False, f"Destination exists (overwrite=False): {dst}")
+            if s.is_dir():
+                _shutil.copytree(str(s), str(d), dirs_exist_ok=True)
+            else:
+                _shutil.copy2(str(s), str(d))
+            size = d.stat().st_size if d.is_file() else sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            return ToolResult(True, f"Copied {src} → {dst}", {"src": src, "dst": dst, "size_bytes": size})
+        except Exception as e:
+            return ToolResult(False, f"copy_file error: {e}")
+
+
+# ── 5. move_file ──────────────────────────────────────────────────────────────
+
+class MoveFileTool(BaseTool):
+    name = "move_file"
+    description = (
+        "Move or rename a file or directory. "
+        "Creates parent directories at destination as needed. "
+        "Use for renaming, reorganizing files, or staging output."
+    )
+    parameters = "src: str, dst: str"
+
+    async def run(self, src: str, dst: str) -> ToolResult:
+        try:
+            s = Path(src)
+            d = Path(dst)
+            if not s.exists():
+                return ToolResult(False, f"Source not found: {src}")
+            d.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.move(str(s), str(d))
+            return ToolResult(True, f"Moved {src} → {dst}", {"src": src, "dst": dst})
+        except Exception as e:
+            return ToolResult(False, f"move_file error: {e}")
+
+
+# ── 6. file_stat ──────────────────────────────────────────────────────────────
+
+class FileStatTool(BaseTool):
+    name = "file_stat"
+    description = (
+        "Get detailed metadata of a file or directory: size, line count, "
+        "modification time, permissions, extension. "
+        "Use before reading large files or to audit project contents."
+    )
+    parameters = "path: str"
+
+    async def run(self, path: str) -> ToolResult:
+        import datetime, stat as _stat
+        try:
+            p = Path(path)
+            if not p.exists():
+                return ToolResult(False, f"Path not found: {path}")
+            s = p.stat()
+            info = {
+                "path": str(p.resolve()),
+                "type": "directory" if p.is_dir() else "file",
+                "size_bytes": s.st_size,
+                "modified": datetime.datetime.fromtimestamp(s.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "created": datetime.datetime.fromtimestamp(s.st_ctime).strftime("%Y-%m-%d %H:%M:%S"),
+                "permissions": oct(s.st_mode & 0o777),
+                "extension": p.suffix,
+            }
+            if p.is_file():
+                try:
+                    text = p.read_text(errors="replace")
+                    info["line_count"] = text.count("\n") + 1
+                    info["char_count"] = len(text)
+                    info["word_count"] = len(text.split())
+                except Exception:
+                    info["note"] = "binary file"
+            else:
+                files = list(p.rglob("*"))
+                info["file_count"] = sum(1 for f in files if f.is_file())
+                info["dir_count"] = sum(1 for f in files if f.is_dir())
+                info["total_size_bytes"] = sum(f.stat().st_size for f in files if f.is_file())
+            return ToolResult(True, json.dumps(info, indent=2), info)
+        except Exception as e:
+            return ToolResult(False, f"file_stat error: {e}")
+
+
+# ── 7. http_request ───────────────────────────────────────────────────────────
+
+class HttpRequestTool(BaseTool):
+    name = "http_request"
+    description = (
+        "Make a generic HTTP request (GET/POST/PUT/PATCH/DELETE). "
+        "Supports custom headers, JSON body, and query params. "
+        "Use to call APIs, webhooks, or any external HTTP endpoint."
+    )
+    parameters = "url: str, method: str = 'GET', headers: dict = None, body: dict = None, params: dict = None, timeout: int = 20"
+
+    async def run(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: dict = None,
+        body: dict = None,
+        params: dict = None,
+        timeout: int = 20,
+    ) -> ToolResult:
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        method = method.upper()
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    headers=headers or {},
+                    json=body if body else None,
+                    params=params or {},
+                )
+            ct = resp.headers.get("content-type", "")
+            try:
+                data = resp.json() if "json" in ct else resp.text
+            except Exception:
+                data = resp.text
+            body_str = json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data)
+            ok = 200 <= resp.status_code < 300
+            return ToolResult(ok, body_str[:8000], {
+                "status_code": resp.status_code,
+                "url": url,
+                "method": method,
+                "content_type": ct,
+            })
+        except Exception as e:
+            return ToolResult(False, f"http_request error: {e}")
+
+
+# ── 8. json_format ────────────────────────────────────────────────────────────
+
+class JsonFormatTool(BaseTool):
+    name = "json_format"
+    description = (
+        "Parse, validate, format (pretty-print), minify, or query JSON data. "
+        "action='format': pretty-print | action='minify': compact | "
+        "action='validate': check validity | action='query': JMESPath-style key access."
+    )
+    parameters = "action: str ('format'|'minify'|'validate'|'query'), data: str, key_path: str = None, indent: int = 2"
+
+    async def run(self, action: str, data: str, key_path: str = None, indent: int = 2) -> ToolResult:
+        # Load from file if path given
+        if len(data) < 512 and Path(data).exists():
+            data = Path(data).read_text(errors="replace")
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as e:
+            return ToolResult(False, f"Invalid JSON: {e}")
+
+        action = action.lower().strip()
+
+        if action == "format":
+            return ToolResult(True, json.dumps(parsed, indent=indent, ensure_ascii=False))
+        elif action == "minify":
+            return ToolResult(True, json.dumps(parsed, separators=(",", ":"), ensure_ascii=False))
+        elif action == "validate":
+            return ToolResult(True, f"Valid JSON. Type: {type(parsed).__name__}, "
+                              f"Keys: {list(parsed.keys()) if isinstance(parsed, dict) else len(parsed)} items")
+        elif action == "query":
+            if not key_path:
+                return ToolResult(False, "query requires key_path (e.g. 'data.items.0.name')")
+            node = parsed
+            for part in key_path.split("."):
+                try:
+                    node = node[int(part)] if part.isdigit() else node[part]
+                except (KeyError, IndexError, TypeError) as e:
+                    return ToolResult(False, f"Key '{part}' not found in path '{key_path}': {e}")
+            result = json.dumps(node, indent=2, ensure_ascii=False) if isinstance(node, (dict, list)) else str(node)
+            return ToolResult(True, result)
+        else:
+            return ToolResult(False, f"Unknown action '{action}'. Use: format | minify | validate | query")
+
+
+# ── 9. yaml_parse ─────────────────────────────────────────────────────────────
+
+class YamlParseTool(BaseTool):
+    name = "yaml_parse"
+    description = (
+        "Parse YAML content or file, convert to JSON, or validate structure. "
+        "action='parse': parse YAML → JSON | action='validate': check YAML syntax | "
+        "action='to_yaml': convert JSON string → YAML."
+    )
+    parameters = "action: str ('parse'|'validate'|'to_yaml'), data: str"
+
+    async def run(self, action: str, data: str) -> ToolResult:
+        try:
+            import yaml  # type: ignore
+        except ImportError:
+            return ToolResult(False, "PyYAML not installed. Run: pip install pyyaml")
+
+        if len(data) < 512 and Path(data).exists():
+            data = Path(data).read_text(errors="replace")
+
+        action = action.lower().strip()
+
+        if action == "parse":
+            try:
+                parsed = yaml.safe_load(data)
+                return ToolResult(True, json.dumps(parsed, indent=2, ensure_ascii=False, default=str),
+                                  {"type": type(parsed).__name__})
+            except yaml.YAMLError as e:
+                return ToolResult(False, f"YAML parse error: {e}")
+        elif action == "validate":
+            try:
+                yaml.safe_load(data)
+                return ToolResult(True, "Valid YAML")
+            except yaml.YAMLError as e:
+                return ToolResult(False, f"Invalid YAML: {e}")
+        elif action == "to_yaml":
+            try:
+                obj = json.loads(data)
+                return ToolResult(True, yaml.dump(obj, default_flow_style=False, allow_unicode=True))
+            except Exception as e:
+                return ToolResult(False, f"to_yaml error: {e}")
+        else:
+            return ToolResult(False, f"Unknown action '{action}'. Use: parse | validate | to_yaml")
+
+
+# ── 10. csv_query ─────────────────────────────────────────────────────────────
+
+class CsvQueryTool(BaseTool):
+    name = "csv_query"
+    description = (
+        "Read, filter, sort, and transform CSV data. "
+        "action='read': load CSV | action='filter': filter rows by column=value | "
+        "action='sort': sort by column | action='stats': basic stats per column."
+    )
+    parameters = "action: str ('read'|'filter'|'sort'|'stats'), path: str, column: str = None, value: str = None, ascending: bool = True, max_rows: int = 50"
+
+    async def run(self, action: str, path: str, column: str = None, value: str = None,
+                  ascending: bool = True, max_rows: int = 50) -> ToolResult:
+        try:
+            p = Path(path)
+            if not p.exists():
+                return ToolResult(False, f"CSV not found: {path}")
+            text = p.read_text(errors="replace")
+            reader = list(_DictReader(_StringIO(text)))
+            if not reader:
+                return ToolResult(False, "CSV is empty or has no rows")
+            headers = list(reader[0].keys())
+
+            action = action.lower().strip()
+
+            if action == "read":
+                rows = reader[:max_rows]
+                lines = [",".join(headers)]
+                for r in rows:
+                    lines.append(",".join(str(r.get(h, "")) for h in headers))
+                note = f"\n(showing {len(rows)}/{len(reader)} rows)" if len(reader) > max_rows else ""
+                return ToolResult(True, "\n".join(lines) + note, {"rows": len(reader), "columns": headers})
+
+            elif action == "filter":
+                if not column or column not in headers:
+                    return ToolResult(False, f"column '{column}' not in headers: {headers}")
+                filtered = [r for r in reader if str(r.get(column, "")).lower() == str(value or "").lower()]
+                lines = [",".join(headers)]
+                for r in filtered[:max_rows]:
+                    lines.append(",".join(str(r.get(h, "")) for h in headers))
+                return ToolResult(True, "\n".join(lines), {"matches": len(filtered)})
+
+            elif action == "sort":
+                if not column or column not in headers:
+                    return ToolResult(False, f"column '{column}' not in headers: {headers}")
+                try:
+                    sorted_rows = sorted(reader, key=lambda r: float(r.get(column, 0)) if r.get(column, "").replace(".", "").replace("-", "").isdigit() else r.get(column, ""), reverse=not ascending)
+                except Exception:
+                    sorted_rows = sorted(reader, key=lambda r: r.get(column, ""), reverse=not ascending)
+                lines = [",".join(headers)]
+                for r in sorted_rows[:max_rows]:
+                    lines.append(",".join(str(r.get(h, "")) for h in headers))
+                return ToolResult(True, "\n".join(lines), {"sorted_by": column, "ascending": ascending})
+
+            elif action == "stats":
+                stats = {}
+                for h in headers:
+                    vals = [r.get(h, "") for r in reader]
+                    nums = []
+                    for v in vals:
+                        try:
+                            nums.append(float(v))
+                        except Exception:
+                            pass
+                    if nums:
+                        stats[h] = {"count": len(vals), "numeric": len(nums),
+                                    "min": min(nums), "max": max(nums),
+                                    "avg": round(sum(nums) / len(nums), 4)}
+                    else:
+                        unique = len(set(vals))
+                        stats[h] = {"count": len(vals), "unique": unique, "type": "string"}
+                return ToolResult(True, json.dumps(stats, indent=2), {"columns": len(headers), "rows": len(reader)})
+
+            else:
+                return ToolResult(False, f"Unknown action '{action}'. Use: read | filter | sort | stats")
+        except Exception as e:
+            return ToolResult(False, f"csv_query error: {e}")
+
+
+# ── 11. base64_codec ──────────────────────────────────────────────────────────
+
+class Base64CodecTool(BaseTool):
+    name = "base64_codec"
+    description = (
+        "Encode text/file to Base64, or decode a Base64 string back to text. "
+        "action='encode': text or file → base64 | action='decode': base64 → text."
+    )
+    parameters = "action: str ('encode'|'decode'), data: str, is_file: bool = False"
+
+    async def run(self, action: str, data: str, is_file: bool = False) -> ToolResult:
+        action = action.lower().strip()
+        try:
+            if action == "encode":
+                if is_file:
+                    p = Path(data)
+                    if not p.exists():
+                        return ToolResult(False, f"File not found: {data}")
+                    raw = p.read_bytes()
+                else:
+                    raw = data.encode("utf-8")
+                encoded = _b64encode(raw).decode("ascii")
+                return ToolResult(True, encoded, {"original_bytes": len(raw), "encoded_chars": len(encoded)})
+            elif action == "decode":
+                try:
+                    decoded = _b64decode(data.strip())
+                    try:
+                        return ToolResult(True, decoded.decode("utf-8"), {"decoded_bytes": len(decoded)})
+                    except UnicodeDecodeError:
+                        return ToolResult(True, f"(binary data, {len(decoded)} bytes — save to file to use)",
+                                          {"decoded_bytes": len(decoded), "is_binary": True})
+                except Exception as e:
+                    return ToolResult(False, f"Base64 decode error: {e}")
+            else:
+                return ToolResult(False, f"Unknown action '{action}'. Use: encode | decode")
+        except Exception as e:
+            return ToolResult(False, f"base64_codec error: {e}")
+
+
+# ── 12. hash_generate ─────────────────────────────────────────────────────────
+
+class HashGenerateTool(BaseTool):
+    name = "hash_generate"
+    description = (
+        "Generate cryptographic hash of text or a file. "
+        "Supports: md5, sha1, sha256, sha512. "
+        "Use to verify file integrity, generate checksums, or fingerprint content."
+    )
+    parameters = "data: str, algorithm: str = 'sha256', is_file: bool = False"
+
+    async def run(self, data: str, algorithm: str = "sha256", is_file: bool = False) -> ToolResult:
+        alg = algorithm.lower().strip()
+        if alg not in ("md5", "sha1", "sha256", "sha512"):
+            return ToolResult(False, f"Unsupported algorithm '{alg}'. Use: md5 | sha1 | sha256 | sha512")
+        try:
+            h = _hashlib.new(alg)
+            if is_file:
+                p = Path(data)
+                if not p.exists():
+                    return ToolResult(False, f"File not found: {data}")
+                h.update(p.read_bytes())
+                label = str(p)
+            else:
+                h.update(data.encode("utf-8"))
+                label = f"text({len(data)} chars)"
+            digest = h.hexdigest()
+            return ToolResult(True, digest, {"algorithm": alg, "source": label, "digest": digest})
+        except Exception as e:
+            return ToolResult(False, f"hash_generate error: {e}")
+
+
+# ── 13. text_replace ──────────────────────────────────────────────────────────
+
+class TextReplaceTool(BaseTool):
+    name = "text_replace"
+    description = (
+        "Find and replace text in a file (string or regex). "
+        "Writes result back to file or returns patched content. "
+        "Use for bulk renaming, refactoring, or applying multiple edits at once."
+    )
+    parameters = "path: str, find: str, replace: str, use_regex: bool = False, count: int = 0, backup: bool = False"
+
+    async def run(self, path: str, find: str, replace: str,
+                  use_regex: bool = False, count: int = 0, backup: bool = False) -> ToolResult:
+        import re
+        try:
+            p = Path(path)
+            if not p.exists():
+                return ToolResult(False, f"File not found: {path}")
+            original = p.read_text(errors="replace")
+
+            if backup:
+                Path(str(p) + ".bak").write_text(original)
+
+            if use_regex:
+                try:
+                    if count:
+                        result, n = re.subn(find, replace, original, count=count)
+                    else:
+                        result, n = re.subn(find, replace, original)
+                except re.error as e:
+                    return ToolResult(False, f"Invalid regex: {e}")
+            else:
+                n = original.count(find) if count == 0 else min(original.count(find), count)
+                result = original.replace(find, replace, count or -1)
+
+            if result == original:
+                return ToolResult(True, "No occurrences found — file unchanged.", {"replacements": 0})
+
+            p.write_text(result)
+            return ToolResult(True, f"Replaced {n} occurrence(s) in {path}",
+                              {"replacements": n, "backup": str(p) + ".bak" if backup else None})
+        except Exception as e:
+            return ToolResult(False, f"text_replace error: {e}")
+
+
+# ── 14. extract_urls ──────────────────────────────────────────────────────────
+
+class ExtractUrlsTool(BaseTool):
+    name = "extract_urls"
+    description = (
+        "Extract all URLs, emails, IPs, or domains from a text string or file. "
+        "type='urls': http/https links | type='emails': email addresses | "
+        "type='ips': IPv4 addresses | type='all': everything."
+    )
+    parameters = "data: str, extract_type: str = 'all', is_file: bool = False"
+
+    async def run(self, data: str, extract_type: str = "all", is_file: bool = False) -> ToolResult:
+        import re
+        if is_file:
+            p = Path(data)
+            if not p.exists():
+                return ToolResult(False, f"File not found: {data}")
+            data = p.read_text(errors="replace")
+
+        patterns = {
+            "urls": r"https?://[^\s\"'<>)\]]+",
+            "emails": r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+",
+            "ips": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+        }
+        et = extract_type.lower().strip()
+        results = {}
+        targets = list(patterns.keys()) if et == "all" else [et]
+
+        for t in targets:
+            if t not in patterns:
+                return ToolResult(False, f"Unknown type '{t}'. Use: urls | emails | ips | all")
+            found = sorted(set(re.findall(patterns[t], data)))
+            results[t] = found
+
+        output = []
+        for t, items in results.items():
+            output.append(f"[{t.upper()}] ({len(items)} found)")
+            output.extend(f"  {x}" for x in items)
+        return ToolResult(True, "\n".join(output) if output else "Nothing found",
+                          {t: len(v) for t, v in results.items()})
+
+
+# ── 15. string_transform ──────────────────────────────────────────────────────
+
+class StringTransformTool(BaseTool):
+    name = "string_transform"
+    description = (
+        "Apply string transformations: upper, lower, title, strip, reverse, "
+        "snake_case, camel_case, count_words, truncate, pad, repeat, slug."
+    )
+    parameters = "text: str, operation: str, arg: str = None"
+
+    async def run(self, text: str, operation: str, arg: str = None) -> ToolResult:
+        import re
+        op = operation.lower().strip()
+        try:
+            result = {
+                "upper":       lambda: text.upper(),
+                "lower":       lambda: text.lower(),
+                "title":       lambda: text.title(),
+                "strip":       lambda: text.strip(),
+                "reverse":     lambda: text[::-1],
+                "count_words": lambda: str(len(text.split())),
+                "count_chars": lambda: str(len(text)),
+                "count_lines": lambda: str(text.count("\n") + 1),
+                "snake_case":  lambda: re.sub(r"[\s\-]+", "_", text).lower(),
+                "camel_case":  lambda: "".join(w.title() for w in re.split(r"[\s_\-]+", text)),
+                "slug":        lambda: re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-"),
+                "truncate":    lambda: text[:int(arg or 100)] + ("..." if len(text) > int(arg or 100) else ""),
+                "pad_left":    lambda: text.rjust(int(arg or 20)),
+                "pad_right":   lambda: text.ljust(int(arg or 20)),
+                "repeat":      lambda: text * int(arg or 2),
+                "split_lines": lambda: "\n".join(f"{i+1}: {l}" for i, l in enumerate(text.splitlines())),
+            }.get(op)
+            if result is None:
+                ops = "upper|lower|title|strip|reverse|count_words|count_chars|count_lines|snake_case|camel_case|slug|truncate|pad_left|pad_right|repeat|split_lines"
+                return ToolResult(False, f"Unknown operation '{op}'. Available: {ops}")
+            return ToolResult(True, result(), {"operation": op, "input_len": len(text)})
+        except Exception as e:
+            return ToolResult(False, f"string_transform error: {e}")
+
+
+# ── 16. date_calc ─────────────────────────────────────────────────────────────
+
+class DateCalcTool(BaseTool):
+    name = "date_calc"
+    description = (
+        "Date and time operations: parse dates, add/subtract intervals, "
+        "format timestamps, calculate differences, get current time in timezone. "
+        "action='now'|'parse'|'add'|'diff'|'format'."
+    )
+    parameters = "action: str, date: str = None, date2: str = None, amount: int = None, unit: str = 'days', fmt: str = '%Y-%m-%d %H:%M:%S', tz: str = 'UTC'"
+
+    async def run(self, action: str, date: str = None, date2: str = None,
+                  amount: int = None, unit: str = "days",
+                  fmt: str = "%Y-%m-%d %H:%M:%S", tz: str = "UTC") -> ToolResult:
+        import datetime as dt
+        action = action.lower().strip()
+
+        def _parse(s):
+            for f in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"):
+                try:
+                    return dt.datetime.strptime(s, f)
+                except ValueError:
+                    pass
+            raise ValueError(f"Cannot parse date: {s}")
+
+        try:
+            if action == "now":
+                now = dt.datetime.utcnow()
+                return ToolResult(True, now.strftime(fmt), {"utc": now.isoformat(), "timestamp": now.timestamp()})
+
+            elif action == "parse":
+                d = _parse(date)
+                return ToolResult(True, d.strftime(fmt), {"parsed": d.isoformat(), "weekday": d.strftime("%A"), "timestamp": d.timestamp()})
+
+            elif action == "add":
+                d = _parse(date)
+                delta_map = {"days": dt.timedelta(days=amount or 0),
+                             "hours": dt.timedelta(hours=amount or 0),
+                             "minutes": dt.timedelta(minutes=amount or 0),
+                             "weeks": dt.timedelta(weeks=amount or 0)}
+                delta = delta_map.get(unit, dt.timedelta(days=amount or 0))
+                result = d + delta
+                return ToolResult(True, result.strftime(fmt), {"result": result.isoformat()})
+
+            elif action == "diff":
+                d1 = _parse(date)
+                d2 = _parse(date2)
+                diff = abs((d2 - d1))
+                return ToolResult(True, f"{diff.days} days, {diff.seconds // 3600} hours, {(diff.seconds % 3600) // 60} minutes",
+                                  {"total_seconds": diff.total_seconds(), "days": diff.days})
+
+            elif action == "format":
+                d = _parse(date)
+                return ToolResult(True, d.strftime(fmt))
+
+            else:
+                return ToolResult(False, f"Unknown action '{action}'. Use: now | parse | add | diff | format")
+        except Exception as e:
+            return ToolResult(False, f"date_calc error: {e}")
+
+
+# ── 17. random_gen ────────────────────────────────────────────────────────────
+
+class RandomGenTool(BaseTool):
+    name = "random_gen"
+    description = (
+        "Generate random data: UUIDs, integers, floats, strings, passwords, "
+        "choices from a list, or random file names. "
+        "type='uuid'|'int'|'float'|'string'|'password'|'choice'."
+    )
+    parameters = "gen_type: str, min_val: int = 0, max_val: int = 100, length: int = 16, charset: str = 'alphanum', choices: str = None, count: int = 1"
+
+    async def run(self, gen_type: str, min_val: int = 0, max_val: int = 100,
+                  length: int = 16, charset: str = "alphanum",
+                  choices: str = None, count: int = 1) -> ToolResult:
+        import uuid as _uuid
+        gt = gen_type.lower().strip()
+        charsets = {
+            "alphanum": _string.ascii_letters + _string.digits,
+            "alpha":    _string.ascii_letters,
+            "digits":   _string.digits,
+            "hex":      _string.hexdigits[:16],
+            "password": _string.ascii_letters + _string.digits + "!@#$%^&*",
+            "lower":    _string.ascii_lowercase,
+            "upper":    _string.ascii_uppercase,
+        }
+        try:
+            results = []
+            for _ in range(max(1, min(count, 100))):
+                if gt == "uuid":
+                    results.append(str(_uuid.uuid4()))
+                elif gt == "int":
+                    results.append(str(_random.randint(min_val, max_val)))
+                elif gt == "float":
+                    results.append(str(round(_random.uniform(min_val, max_val), 6)))
+                elif gt in ("string", "password"):
+                    cs = charsets.get(charset if gt == "string" else "password", charsets["alphanum"])
+                    results.append("".join(_random.choices(cs, k=length)))
+                elif gt == "choice":
+                    if not choices:
+                        return ToolResult(False, "choice requires 'choices' (comma-separated)")
+                    items = [c.strip() for c in choices.split(",")]
+                    results.append(_random.choice(items))
+                else:
+                    return ToolResult(False, f"Unknown type '{gt}'. Use: uuid | int | float | string | password | choice")
+            return ToolResult(True, "\n".join(results), {"count": len(results), "type": gt})
+        except Exception as e:
+            return ToolResult(False, f"random_gen error: {e}")
+
+
+# ── 18. compress_text ─────────────────────────────────────────────────────────
+
+class CompressTextTool(BaseTool):
+    name = "compress_text"
+    description = (
+        "Compress or decompress text/file using gzip or zlib. "
+        "Returns base64-encoded compressed data, or decompressed text. "
+        "action='compress'|'decompress'. algorithm='gzip'|'zlib'."
+    )
+    parameters = "action: str ('compress'|'decompress'), data: str, algorithm: str = 'gzip', is_file: bool = False"
+
+    async def run(self, action: str, data: str, algorithm: str = "gzip", is_file: bool = False) -> ToolResult:
+        action = action.lower().strip()
+        alg = algorithm.lower().strip()
+        try:
+            if is_file:
+                p = Path(data)
+                if not p.exists():
+                    return ToolResult(False, f"File not found: {data}")
+                raw = p.read_bytes()
+            else:
+                raw = data.encode("utf-8")
+
+            if action == "compress":
+                if alg == "gzip":
+                    compressed = _gzip.compress(raw, compresslevel=9)
+                elif alg == "zlib":
+                    compressed = _zlib.compress(raw, level=9)
+                else:
+                    return ToolResult(False, f"Unknown algorithm '{alg}'. Use: gzip | zlib")
+                encoded = _b64encode(compressed).decode("ascii")
+                ratio = round(len(compressed) / len(raw) * 100, 1)
+                return ToolResult(True, encoded, {
+                    "original_bytes": len(raw), "compressed_bytes": len(compressed),
+                    "ratio_pct": ratio, "algorithm": alg,
+                    "note": "Paste this base64 into action='decompress' to restore."
+                })
+
+            elif action == "decompress":
+                try:
+                    compressed = _b64decode(data.strip())
+                except Exception as e:
+                    return ToolResult(False, f"Base64 decode error: {e}")
+                if alg == "gzip":
+                    decompressed = _gzip.decompress(compressed)
+                elif alg == "zlib":
+                    decompressed = _zlib.decompress(compressed)
+                else:
+                    return ToolResult(False, f"Unknown algorithm '{alg}'. Use: gzip | zlib")
+                try:
+                    return ToolResult(True, decompressed.decode("utf-8"), {"bytes": len(decompressed)})
+                except UnicodeDecodeError:
+                    return ToolResult(True, f"(binary, {len(decompressed)} bytes)", {"is_binary": True})
+            else:
+                return ToolResult(False, f"Unknown action '{action}'. Use: compress | decompress")
+        except Exception as e:
+            return ToolResult(False, f"compress_text error: {e}")
+
+
+# ── 19. xml_parse ─────────────────────────────────────────────────────────────
+
+class XmlParseTool(BaseTool):
+    name = "xml_parse"
+    description = (
+        "Parse XML content or file: extract elements, attributes, text, "
+        "or convert to JSON dict. "
+        "action='parse': full parse → JSON | action='xpath': find elements by tag | "
+        "action='validate': check XML syntax."
+    )
+    parameters = "action: str ('parse'|'xpath'|'validate'), data: str, tag: str = None"
+
+    async def run(self, action: str, data: str, tag: str = None) -> ToolResult:
+        if len(data) < 512 and Path(data).exists():
+            data = Path(data).read_text(errors="replace")
+
+        action = action.lower().strip()
+
+        def _elem_to_dict(elem):
+            d = {"tag": elem.tag, "attrib": elem.attrib, "text": (elem.text or "").strip()}
+            children = [_elem_to_dict(c) for c in elem]
+            if children:
+                d["children"] = children
+            return d
+
+        try:
+            root = _ET.fromstring(data)
+        except _ET.ParseError as e:
+            return ToolResult(False, f"XML parse error: {e}")
+
+        if action == "validate":
+            return ToolResult(True, f"Valid XML. Root tag: <{root.tag}>, children: {len(list(root))}")
+
+        elif action == "parse":
+            d = _elem_to_dict(root)
+            return ToolResult(True, json.dumps(d, indent=2, ensure_ascii=False), {"root_tag": root.tag})
+
+        elif action == "xpath":
+            if not tag:
+                return ToolResult(False, "xpath requires 'tag' parameter")
+            found = root.findall(f".//{tag}")
+            if not found:
+                return ToolResult(False, f"No elements found with tag '{tag}'")
+            results = []
+            for e in found:
+                results.append({"tag": e.tag, "attrib": e.attrib, "text": (e.text or "").strip()})
+            return ToolResult(True, json.dumps(results, indent=2, ensure_ascii=False), {"count": len(found)})
+
+        else:
+            return ToolResult(False, f"Unknown action '{action}'. Use: parse | xpath | validate")
+
+
+# ── 20. count_stats ───────────────────────────────────────────────────────────
+
+class CountStatsTool(BaseTool):
+    name = "count_stats"
+    description = (
+        "Count statistics of text or file: words, lines, characters, "
+        "unique words, most frequent words, avg line length, blank lines. "
+        "Useful before processing large files or measuring code complexity."
+    )
+    parameters = "data: str, is_file: bool = False, top_words: int = 10"
+
+    async def run(self, data: str, is_file: bool = False, top_words: int = 10) -> ToolResult:
+        import collections, re
+        try:
+            if is_file:
+                p = Path(data)
+                if not p.exists():
+                    return ToolResult(False, f"File not found: {data}")
+                data = p.read_text(errors="replace")
+
+            lines = data.splitlines()
+            words = re.findall(r"\b[a-zA-Z_]\w*\b", data.lower())
+            freq = collections.Counter(words).most_common(top_words)
+
+            stats = {
+                "characters":    len(data),
+                "characters_no_space": len(data.replace(" ", "").replace("\n", "")),
+                "words":         len(words),
+                "unique_words":  len(set(words)),
+                "lines":         len(lines),
+                "blank_lines":   sum(1 for l in lines if not l.strip()),
+                "avg_line_len":  round(sum(len(l) for l in lines) / max(len(lines), 1), 1),
+                "max_line_len":  max((len(l) for l in lines), default=0),
+                "top_words":     dict(freq),
+            }
+            return ToolResult(True, json.dumps(stats, indent=2), stats)
+        except Exception as e:
+            return ToolResult(False, f"count_stats error: {e}")
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 class ToolRegistry:
@@ -752,29 +1655,44 @@ class ToolRegistry:
         enabled = cfg.get("tools", {})
 
         # Always register utility tools
-        for tool in [GetTimeTool(), CalculateTool(), SummarizeTextTool()]:
+        for tool in [GetTimeTool(), CalculateTool(), SummarizeTextTool(),
+                     CountStatsTool(), RandomGenTool(), DateCalcTool(), StringTransformTool()]:
             self._register(tool)
 
         if enabled.get("file_ops", True):
-            for tool in [ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool(),
-                         ZipManageTool(), ExportFileBase64Tool(), ExportFileLinkTool(), DiffPatchTool()]:
+            for tool in [
+                ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool(),
+                ZipManageTool(), ExportFileBase64Tool(), ExportFileLinkTool(), DiffPatchTool(),
+                CopyFileTool(), MoveFileTool(), FindFilesTool(), FileStatTool(), TextReplaceTool(),
+                GrepSearchTool(),
+            ]:
                 self._register(tool)
 
         if enabled.get("fetch_url", True):
             self._register(FetchURLTool())
+            self._register(HttpRequestTool())
 
         if enabled.get("web_search", True):
             self._register(WebSearchTool())
+            self._register(ExtractUrlsTool())
 
         if enabled.get("code_exec", True):
             exec_tool = ExecuteCodeTool()
             exec_tool.ENABLED = True
             exec_tool.TIMEOUT = enabled.get("code_exec_timeout", 15)
             self._register(exec_tool)
+            self._register(ShellExecTool())
         else:
             exec_tool = ExecuteCodeTool()
             exec_tool.ENABLED = False
             self._register(exec_tool)
+
+        # Data & encoding tools — always on
+        for tool in [
+            JsonFormatTool(), YamlParseTool(), CsvQueryTool(),
+            Base64CodecTool(), HashGenerateTool(), CompressTextTool(), XmlParseTool(),
+        ]:
+            self._register(tool)
 
     def _register(self, tool: BaseTool):
         self._tools[tool.name] = tool

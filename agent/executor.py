@@ -170,7 +170,7 @@ class StepExecutor:
             if on_event:
                 on_event("turn", {"turn": turn + 1, "step_id": step.id})
 
-            llm_output = await self._call_llm(messages)
+            llm_output = await self._call_llm(messages, on_event=on_event)
 
             if on_event:
                 on_event("llm_output", {"output": llm_output[:500], "step_id": step.id})
@@ -221,8 +221,12 @@ class StepExecutor:
         # Exhausted turns without Final Answer
         return False, "Max ReAct turns reached without completion."
 
-    async def _call_llm(self, messages: list[dict], retry: int = 0) -> str:
-        # OpenRouter API: POST /v1/chat/completions (OpenAI-compatible)
+    async def _call_llm(self, messages: list[dict], retry: int = 0, on_event=None) -> str:
+        """
+        Call LLM and auto-continue if output was truncated (finish_reason == 'length').
+        Concatenates all partial outputs into one complete response.
+        Max 6 continuation rounds to prevent infinite loops.
+        """
         url = f"{self._base_url.rstrip('/')}/chat/completions"
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -230,20 +234,59 @@ class StepExecutor:
             "HTTP-Referer": "https://github.com/gazcc",
             "X-Title": "GazccThinking",
         }
-        payload = {
-            "model": self._model,
-            "messages": messages,
-            "max_tokens": 4000,
-            "temperature": 0.1,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-        except (httpx.HTTPStatusError, httpx.TimeoutException, KeyError) as e:
-            if retry < self._retry_limit:
-                await asyncio.sleep(2 ** retry)
-                return await self._call_llm(messages, retry + 1)
-            raise RuntimeError(f"LLM call failed after {self._retry_limit} retries: {e}") from e
+
+        full_output_parts: list[str] = []
+        current_messages = list(messages)
+        MAX_CONTINUATION_ROUNDS = 6
+
+        for continuation_round in range(MAX_CONTINUATION_ROUNDS):
+            payload = {
+                "model": self._model,
+                "messages": current_messages,
+                "max_tokens": 4000,
+                "temperature": 0.1,
+            }
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                choice = data["choices"][0]
+                content: str = choice["message"]["content"] or ""
+                finish_reason: str = choice.get("finish_reason", "stop")
+
+                full_output_parts.append(content)
+
+                # If model finished naturally, we're done
+                if finish_reason != "length":
+                    break
+
+                # Output was truncated — notify frontend and continue
+                # This fires the existing on_event callback so the UI shows "Continuing..."
+                if on_event:
+                    on_event("continuation", {
+                        "round": continuation_round + 1,
+                        "msg": f"Output truncated (finish_reason=length), auto-continuing... round {continuation_round + 1}/{MAX_CONTINUATION_ROUNDS}"
+                    })
+
+                # Append the partial assistant turn and request continuation
+                current_messages = list(current_messages) + [
+                    {"role": "assistant", "content": content},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response was cut off because it was too long. "
+                            "Continue EXACTLY from where you stopped — do NOT repeat any previous text. "
+                            "Just continue the output seamlessly."
+                        ),
+                    },
+                ]
+
+            except (httpx.HTTPStatusError, httpx.TimeoutException, KeyError) as e:
+                if retry < self._retry_limit:
+                    await asyncio.sleep(2 ** retry)
+                    return await self._call_llm(messages, retry + 1, on_event=on_event)
+                raise RuntimeError(f"LLM call failed after {self._retry_limit} retries: {e}") from e
+
+        return "".join(full_output_parts)

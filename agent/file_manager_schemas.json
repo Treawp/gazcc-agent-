@@ -1,0 +1,124 @@
+{
+  "file_management_suite_schemas": {
+    "version": "1.0.0",
+    "description": "Function Calling JSON Schemas untuk File Management Suite. Plug langsung ke OpenAI tools[] atau Anthropic tools[].",
+    "tools": [
+
+      {
+        "name": "list_files",
+        "description": "List semua file dan subdirektori di dalam path yang diberikan di sandbox Agent. Gunakan sebelum operasi file lain untuk memastikan file tersedia.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "directory": {
+              "type": "string",
+              "description": "Path direktori relatif terhadap sandbox root. Gunakan '.' untuk root sandbox, atau subfolder seperti 'extracted/' atau 'project/src'.",
+              "default": "."
+            }
+          },
+          "required": []
+        }
+      },
+
+      {
+        "name": "read_file",
+        "description": "Baca konten file teks dari sandbox. Cocok untuk .txt, .json, .py, .html, .md, .yaml, .csv dan file teks lainnya. Untuk binary/gambar, gunakan get_file_as_base64.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filepath": {
+              "type": "string",
+              "description": "Path file relatif terhadap sandbox root. Contoh: 'config.json', 'extracted/main.py', 'data/report.txt'."
+            }
+          },
+          "required": ["filepath"]
+        }
+      },
+
+      {
+        "name": "write_file",
+        "description": "Buat atau overwrite file dengan konten teks yang diberikan. Otomatis membuat parent directories jika belum ada. Gunakan setelah modifikasi konten untuk menyimpan perubahan.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filepath": {
+              "type": "string",
+              "description": "Path file relatif terhadap sandbox root. Contoh: 'output.txt', 'extracted/config.json'. Parent directories akan dibuat otomatis."
+            },
+            "content": {
+              "type": "string",
+              "description": "Konten teks yang akan ditulis ke file. Untuk JSON, pastikan string sudah valid JSON."
+            }
+          },
+          "required": ["filepath", "content"]
+        }
+      },
+
+      {
+        "name": "manage_zip",
+        "description": "Manajemen file ZIP: list isi, extract, atau buat ZIP baru. Orchestration flow: (1) action='list' untuk lihat isi, (2) action='extract' untuk unzip, (3) action='create' untuk zip ulang setelah modifikasi.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["list", "extract", "create"],
+              "description": "Operasi yang dilakukan: 'list' = tampilkan isi ZIP tanpa extract | 'extract' = unzip file ke direktori | 'create' = buat ZIP baru dari list file."
+            },
+            "filename": {
+              "type": "string",
+              "description": "Untuk action='list' atau 'extract': path ke file .zip yang sudah ada. Untuk action='create': nama output ZIP yang akan dibuat (contoh: 'output.zip')."
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "WAJIB untuk action='create'. List path file yang akan di-zip. Contoh: ['extracted/main.py', 'extracted/config.json']. Diabaikan untuk action='list' dan 'extract'."
+            },
+            "internal_file": {
+              "type": "string",
+              "description": "Opsional, hanya untuk action='extract'. Nama spesifik file di dalam ZIP yang ingin di-extract. Jika tidak diisi, semua file akan di-extract."
+            },
+            "dest_dir": {
+              "type": "string",
+              "description": "Opsional, hanya untuk action='extract'. Direktori tujuan ekstraksi relatif ke sandbox. Default: subdirektori dengan nama ZIP (tanpa .zip extension)."
+            }
+          },
+          "required": ["action", "filename"]
+        }
+      },
+
+      {
+        "name": "get_file_as_base64",
+        "description": "Encode file ke Base64 untuk dikirim ke User Interface. Kembalikan 'export_marker' dari response ini dan sertakan PERSIS di Final Answer agar UI merender tombol download. Cocok untuk file hingga 10MB.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string",
+              "description": "Path file relatif terhadap sandbox root yang ingin dikirim ke user. Contoh: 'output.zip', 'report.pdf', 'result.json'."
+            }
+          },
+          "required": ["filename"]
+        }
+      },
+
+      {
+        "name": "generate_download_link",
+        "description": "Generate URL download yang bisa diklik user untuk mengunduh file. Lebih baik dari Base64 untuk file besar atau UX yang lebih clean. Kembalikan 'export_marker' dari response ini dan sertakan di Final Answer.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filename": {
+              "type": "string",
+              "description": "Path file relatif terhadap sandbox root yang ingin di-share ke user. Contoh: 'output.zip', 'bundle.tar.gz'."
+            }
+          },
+          "required": ["filename"]
+        }
+      }
+
+    ]
+  }
+}

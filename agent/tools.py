@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import uuid
+import zipfile
+import shutil
 
 import aiofiles
 import httpx
@@ -508,6 +510,83 @@ class ExportFileLinkTool(BaseTool):
         except Exception as e:
             return ToolResult(False, f"export_file_link error: {e}")
 
+
+# ── zip management tool ───────────────────────────────────────────────────────
+
+class ZipManageTool(BaseTool):
+    name = "manage_zip"
+    description = (
+        "ZIP file management: list contents, extract, or create new ZIP. "
+        "action='list': show ZIP contents | action='extract': unzip files | "
+        "action='create': compress files into new ZIP."
+    )
+    parameters = "action: str, filename: str, files: list = None, internal_file: str = None, dest_dir: str = None"
+
+    async def run(self, action: str, filename: str, files: list = None,
+                  internal_file: str = None, dest_dir: str = None) -> ToolResult:
+        import json as _json
+        action = action.lower().strip()
+        p = Path(filename)
+
+        if action == "list":
+            if not p.exists():
+                return ToolResult(False, f"ZIP tidak ditemukan: {filename}")
+            if not zipfile.is_zipfile(p):
+                return ToolResult(False, f"Bukan file ZIP valid: {filename}")
+            try:
+                entries = []
+                with zipfile.ZipFile(p, "r") as zf:
+                    for info in zf.infolist():
+                        entries.append({"name": info.filename, "size_bytes": info.file_size,
+                                        "compressed_bytes": info.compress_size, "is_dir": info.filename.endswith("/")})
+                return ToolResult(True, _json.dumps({"zip_file": str(p), "total": len(entries), "entries": entries}, indent=2))
+            except Exception as e:
+                return ToolResult(False, f"manage_zip(list) error: {e}")
+
+        elif action == "extract":
+            if not p.exists():
+                return ToolResult(False, f"ZIP tidak ditemukan: {filename}")
+            if not zipfile.is_zipfile(p):
+                return ToolResult(False, f"Bukan file ZIP valid: {filename}")
+            out_dir = Path(dest_dir) if dest_dir else p.parent / p.stem
+            out_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                extracted = []
+                with zipfile.ZipFile(p, "r") as zf:
+                    if internal_file:
+                        zf.extract(internal_file, path=out_dir)
+                        extracted.append(internal_file)
+                    else:
+                        zf.extractall(path=out_dir)
+                        extracted = [m.filename for m in zf.infolist() if not m.filename.endswith("/")]
+                return ToolResult(True, _json.dumps({"extracted_to": str(out_dir), "files": extracted}, indent=2))
+            except KeyError:
+                return ToolResult(False, f"File '{internal_file}' tidak ada di dalam ZIP.")
+            except Exception as e:
+                return ToolResult(False, f"manage_zip(extract) error: {e}")
+
+        elif action == "create":
+            if not files:
+                return ToolResult(False, "Parameter 'files' wajib diisi untuk action='create'.")
+            out_zip = Path(filename)
+            out_zip.parent.mkdir(parents=True, exist_ok=True)
+            added = []
+            try:
+                with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for f in files:
+                        fp = Path(f)
+                        if not fp.exists():
+                            return ToolResult(False, f"File tidak ditemukan: {f}")
+                        zf.write(fp, arcname=fp.name)
+                        added.append(fp.name)
+                return ToolResult(True, _json.dumps({"zip_created": str(out_zip), "files_added": added,
+                                                     "zip_size_bytes": out_zip.stat().st_size}, indent=2))
+            except Exception as e:
+                return ToolResult(False, f"manage_zip(create) error: {e}")
+        else:
+            return ToolResult(False, f"Action tidak valid: '{action}'. Gunakan: list, extract, create.")
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 class ToolRegistry:
@@ -521,7 +600,7 @@ class ToolRegistry:
 
         if enabled.get("file_ops", True):
             for tool in [ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool(),
-                         ExportFileBase64Tool(), ExportFileLinkTool()]:
+                         ZipManageTool(), ExportFileBase64Tool(), ExportFileLinkTool()]:
                 self._register(tool)
 
         if enabled.get("fetch_url", True):

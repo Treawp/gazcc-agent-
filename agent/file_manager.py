@@ -1,728 +1,354 @@
 """
-agent/file_manager.py
-=====================
-File Management Suite — Production Toolset untuk AI Agent.
-Dirancang untuk Function Calling integration (OpenAI / Anthropic format).
-
-Semua fungsi:
-  - Return dict yang konsisten  → { "status": "ok"|"error", "data": ..., ... }
-  - Aman dari path traversal    → SANDBOX_ROOT enforcement
-  - Sync + async friendly       → sync by default, bisa di-wrap asyncio.to_thread()
-
-Tool List:
-  1. list_files(directory)
-  2. read_file(filepath)
-  3. write_file(filepath, content)
-  4. manage_zip(action, filename, files, internal_file, dest_dir)
-  5. get_file_as_base64(filename)
-  6. generate_download_link(filename)
-
-Agent Orchestration Flow (Full Cycle):
-  receive_zip → manage_zip(action='list') → manage_zip(action='extract')
-  → read_file() → write_file() → manage_zip(action='create')
-  → get_file_as_base64() | generate_download_link()
+agent/file_manager.py  — v2.0 Deep-Exploration Edition
+=======================================================
+Tools: list_files_recursive★ | list_files | read_file | write_file |
+       manage_zip | search_in_files★ | move_or_rename_file★ | delete_file★ |
+       get_file_as_base64 | generate_download_link
 """
-
-import base64
-import json
-import mimetypes
-import os
-import shutil
-import uuid
-import zipfile
+import base64, json, mimetypes, os, re, shutil, uuid, zipfile
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONFIG — ubah sesuai environment
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Root sandbox. Semua operasi file dibatasi di dalam direktori ini.
-SANDBOX_ROOT = Path(os.environ.get("AGENT_SANDBOX", "/tmp/gazcc_sandbox")).resolve()
-
-# Direktori untuk file ekspor (download link)
-EXPORT_DIR = Path(os.environ.get("AGENT_EXPORT_DIR", "/tmp/gazcc_exports")).resolve()
-
-# Base URL untuk download links (set via env, misal VERCEL_URL atau domain kamu)
-BASE_URL = os.environ.get("AGENT_BASE_URL", "http://localhost:8000")
-
-# Batas ukuran file untuk Base64 export (default 10MB)
+SANDBOX_ROOT     = Path(os.environ.get("AGENT_SANDBOX",    "/tmp/gazcc_sandbox")).resolve()
+EXPORT_DIR       = Path(os.environ.get("AGENT_EXPORT_DIR", "/tmp/gazcc_exports")).resolve()
+BASE_URL         = os.environ.get("AGENT_BASE_URL",        "http://localhost:8000")
 MAX_EXPORT_BYTES = int(os.environ.get("MAX_EXPORT_MB", "10")) * 1024 * 1024
-
-# Batas ukuran file untuk read (default 2MB)
-MAX_READ_BYTES = 2 * 1024 * 1024
-
-# Auto-buat direktori yang diperlukan saat module diimport
+MAX_READ_BYTES   = 2 * 1024 * 1024
 SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# INTERNAL HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _ok(data: dict) -> dict:
-    """Wrap successful result."""
-    return {"status": "ok", **data}
-
-
-def _err(message: str, code: str = "ERROR") -> dict:
-    """Wrap error result."""
-    return {"status": "error", "code": code, "message": message}
-
+def _ok(d): return {"status": "ok", **d}
+def _err(m, c="ERROR"): return {"status": "error", "code": c, "message": m}
 
 def _resolve(filepath: str, must_exist: bool = False) -> Path:
-    """
-    Resolve path ke SANDBOX_ROOT.
-    Mencegah path traversal (../../etc/passwd dan sejenisnya).
-    """
-    # Jika absolute path diberikan, strip prefix-nya
     p = Path(filepath)
     if p.is_absolute():
-        # Coba resolve relatif ke sandbox
-        try:
-            rel = p.relative_to(SANDBOX_ROOT)
-            resolved = SANDBOX_ROOT / rel
-        except ValueError:
-            # Path di luar sandbox → paksa masuk sandbox
-            resolved = SANDBOX_ROOT / p.name
+        try:    resolved = SANDBOX_ROOT / p.relative_to(SANDBOX_ROOT)
+        except: resolved = SANDBOX_ROOT / p.name
     else:
         resolved = (SANDBOX_ROOT / filepath).resolve()
-
-    # Pastikan masih di dalam sandbox setelah resolve
-    try:
-        resolved.relative_to(SANDBOX_ROOT)
-    except ValueError:
-        raise PermissionError(f"Path traversal detected. Path harus di dalam sandbox: {SANDBOX_ROOT}")
-
+    try:    resolved.relative_to(SANDBOX_ROOT)
+    except: raise PermissionError(f"Path traversal blocked: {filepath}")
     if must_exist and not resolved.exists():
-        raise FileNotFoundError(f"File/directory tidak ditemukan: {resolved}")
-
+        raise FileNotFoundError(f"Tidak ditemukan: {resolved}")
     return resolved
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 1 — list_files
-# ─────────────────────────────────────────────────────────────────────────────
-
-def list_files(directory: str = ".") -> dict:
+# ── TOOL 1: list_files_recursive ★ ─────────────────────────────────────────
+def list_files_recursive(directory: str = ".", max_depth: int = 10, include_hidden: bool = False) -> dict:
     """
-    List semua file dan subdirektori di dalam path yang diberikan.
-
-    Args:
-        directory: Path direktori relatif terhadap SANDBOX_ROOT.
-                   Gunakan "." untuk root sandbox.
-
-    Returns:
-        {
-          "status": "ok",
-          "directory": str,
-          "total_items": int,
-          "items": [
-            { "name": str, "type": "file"|"directory",
-              "size_bytes": int, "path": str }
-          ]
-        }
-
-    Agent usage:
-        Panggil dulu sebelum baca/tulis untuk tahu apa yang ada di sandbox.
+    ★ DEEP EXPLORER — Gunakan tool ini PERTAMA setelah extract ZIP untuk
+    memetakan SELURUH struktur folder dan file proyek secara rekursif.
+    Output mencakup ASCII tree visual, flat list semua path (siap di-loop
+    dengan read_file), dan ringkasan per ekstensi. Tanpa tool ini, Agent
+    bergerak buta dalam proyek multi-folder.
     """
     try:
         target = _resolve(directory)
+        if not target.exists(): return _err(f"Tidak ditemukan: {directory}", "NOT_FOUND")
+        if not target.is_dir(): return _err(f"Bukan direktori: {directory}", "NOT_A_DIRECTORY")
 
-        if not target.exists():
-            return _err(f"Direktori tidak ditemukan: {directory}", "NOT_FOUND")
-        if not target.is_dir():
-            return _err(f"Bukan direktori: {directory}", "NOT_A_DIRECTORY")
+        nodes, flat_paths, ext_counter, tree_lines = [], [], {}, []
+        root_rel = str(target.relative_to(SANDBOX_ROOT)) if target != SANDBOX_ROOT else "."
+        tree_lines.append(f"📂 {root_rel}/")
 
-        items = []
-        for item in sorted(target.iterdir()):
-            entry = {
-                "name": item.name,
-                "type": "directory" if item.is_dir() else "file",
-                "size_bytes": item.stat().st_size if item.is_file() else 0,
-                "path": str(item.relative_to(SANDBOX_ROOT)),
-            }
-            items.append(entry)
+        def _walk(cur: Path, depth: int, prefix: str):
+            if depth > max_depth: return
+            try: children = sorted(cur.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+            except PermissionError: return
+            if not include_hidden:
+                children = [c for c in children if not c.name.startswith(".")]
+            for i, child in enumerate(children):
+                is_last = (i == len(children) - 1)
+                icon    = "📁 " if child.is_dir() else "📄 "
+                tree_lines.append(f"{prefix}{'└── ' if is_last else '├── '}{icon}{child.name}")
+                rel = str(child.relative_to(SANDBOX_ROOT))
+                ext = child.suffix.lower() if child.is_file() else ""
+                nodes.append({"path": rel, "name": child.name,
+                               "type": "directory" if child.is_dir() else "file",
+                               "depth": depth, "size_bytes": child.stat().st_size if child.is_file() else 0,
+                               "extension": ext})
+                if child.is_file():
+                    flat_paths.append(rel)
+                    ext_counter[ext] = ext_counter.get(ext, 0) + 1
+                if child.is_dir():
+                    _walk(child, depth + 1, prefix + ("    " if is_last else "│   "))
 
+        _walk(target, 1, "")
+        total_files = sum(1 for n in nodes if n["type"] == "file")
+        total_dirs  = sum(1 for n in nodes if n["type"] == "directory")
         return _ok({
-            "directory": str(target.relative_to(SANDBOX_ROOT)),
-            "total_items": len(items),
-            "items": items,
+            "root": root_rel,
+            "tree": "\n".join(tree_lines),
+            "flat_paths": flat_paths,
+            "total_files": total_files,
+            "total_dirs":  total_dirs,
+            "extensions_summary": dict(sorted(ext_counter.items(), key=lambda x: -x[1])),
+            "nodes": nodes,
         })
-
-    except PermissionError as e:
-        return _err(str(e), "PERMISSION_DENIED")
-    except Exception as e:
-        return _err(f"list_files gagal: {e}", "UNEXPECTED_ERROR")
+    except PermissionError as e: return _err(str(e), "PERMISSION_DENIED")
+    except Exception as e:       return _err(f"list_files_recursive error: {e}", "UNEXPECTED_ERROR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 2 — read_file
-# ─────────────────────────────────────────────────────────────────────────────
+# ── TOOL 2: list_files (shallow) ────────────────────────────────────────────
+def list_files(directory: str = ".") -> dict:
+    """List satu level direktori (non-rekursif). Untuk deep mapping gunakan list_files_recursive."""
+    try:
+        target = _resolve(directory)
+        if not target.exists(): return _err(f"Tidak ditemukan: {directory}", "NOT_FOUND")
+        if not target.is_dir(): return _err(f"Bukan direktori: {directory}", "NOT_A_DIRECTORY")
+        items = [{"name": i.name, "type": "directory" if i.is_dir() else "file",
+                  "size_bytes": i.stat().st_size if i.is_file() else 0,
+                  "path": str(i.relative_to(SANDBOX_ROOT))}
+                 for i in sorted(target.iterdir())]
+        return _ok({"directory": str(target.relative_to(SANDBOX_ROOT)), "total_items": len(items), "items": items})
+    except Exception as e: return _err(str(e), "ERROR")
 
+
+# ── TOOL 3: read_file ────────────────────────────────────────────────────────
 def read_file(filepath: str) -> dict:
-    """
-    Baca konten file teks.
-
-    Args:
-        filepath: Path file relatif terhadap SANDBOX_ROOT.
-
-    Returns:
-        {
-          "status": "ok",
-          "filepath": str,
-          "content": str,
-          "size_bytes": int,
-          "encoding": str
-        }
-
-    Agent usage:
-        Setelah extract ZIP, panggil ini untuk baca file yang diperlukan.
-        Untuk binary file (gambar, dll), gunakan get_file_as_base64.
-    """
+    """Baca konten file teks. Gunakan flat_paths dari list_files_recursive untuk loop."""
     try:
         target = _resolve(filepath, must_exist=True)
-
-        if not target.is_file():
-            return _err(f"Bukan file: {filepath}", "NOT_A_FILE")
-
+        if not target.is_file(): return _err(f"Bukan file: {filepath}", "NOT_A_FILE")
         size = target.stat().st_size
         if size > MAX_READ_BYTES:
-            return _err(
-                f"File terlalu besar ({size // 1024}KB > {MAX_READ_BYTES // 1024}KB limit). "
-                f"Gunakan get_file_as_base64 untuk binary export.",
-                "FILE_TOO_LARGE"
-            )
-
-        # Coba baca UTF-8 dulu, fallback ke latin-1
+            return _err(f"File terlalu besar ({size//1024}KB). Gunakan get_file_as_base64.", "FILE_TOO_LARGE")
         for enc in ("utf-8", "utf-8-sig", "latin-1"):
             try:
-                content = target.read_text(encoding=enc)
-                return _ok({
-                    "filepath": str(target.relative_to(SANDBOX_ROOT)),
-                    "content": content,
-                    "size_bytes": size,
-                    "encoding": enc,
-                })
-            except UnicodeDecodeError:
-                continue
-
-        return _err(f"File tidak bisa dibaca sebagai teks. Mungkin binary. Coba get_file_as_base64.", "ENCODING_ERROR")
-
-    except FileNotFoundError as e:
-        return _err(str(e), "NOT_FOUND")
-    except PermissionError as e:
-        return _err(str(e), "PERMISSION_DENIED")
-    except Exception as e:
-        return _err(f"read_file gagal: {e}", "UNEXPECTED_ERROR")
+                return _ok({"filepath": str(target.relative_to(SANDBOX_ROOT)),
+                             "content": target.read_text(encoding=enc),
+                             "size_bytes": size, "encoding": enc})
+            except UnicodeDecodeError: continue
+        return _err("Binary file. Gunakan get_file_as_base64.", "ENCODING_ERROR")
+    except FileNotFoundError as e: return _err(str(e), "NOT_FOUND")
+    except Exception as e:         return _err(str(e), "ERROR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 3 — write_file
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── TOOL 4: write_file ───────────────────────────────────────────────────────
 def write_file(filepath: str, content: str) -> dict:
-    """
-    Tulis atau overwrite file dengan konten yang diberikan.
-    Otomatis buat parent directories jika belum ada.
-
-    Args:
-        filepath: Path file relatif terhadap SANDBOX_ROOT.
-        content:  Konten teks yang akan ditulis.
-
-    Returns:
-        {
-          "status": "ok",
-          "filepath": str,
-          "bytes_written": int,
-          "created_dirs": bool
-        }
-
-    Agent usage:
-        Setelah modifikasi konten via read_file, panggil ini untuk simpan.
-        Kemudian bisa di-zip ulang dengan manage_zip(action='create').
-    """
+    """Buat atau overwrite file. Parent dirs dibuat otomatis."""
     try:
         target = _resolve(filepath)
-
-        # Buat parent dirs jika belum ada
-        created_dirs = not target.parent.exists()
+        created = not target.parent.exists()
         target.parent.mkdir(parents=True, exist_ok=True)
-
         target.write_text(content, encoding="utf-8")
-        bytes_written = target.stat().st_size
-
-        return _ok({
-            "filepath": str(target.relative_to(SANDBOX_ROOT)),
-            "bytes_written": bytes_written,
-            "created_dirs": created_dirs,
-            "absolute_path": str(target),
-        })
-
-    except PermissionError as e:
-        return _err(str(e), "PERMISSION_DENIED")
-    except Exception as e:
-        return _err(f"write_file gagal: {e}", "UNEXPECTED_ERROR")
+        return _ok({"filepath": str(target.relative_to(SANDBOX_ROOT)),
+                    "bytes_written": target.stat().st_size, "created_dirs": created})
+    except Exception as e: return _err(str(e), "ERROR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 4 — manage_zip
-# ─────────────────────────────────────────────────────────────────────────────
-
-def manage_zip(
-    action: str,
-    filename: str,
-    files: Optional[list] = None,
-    internal_file: Optional[str] = None,
-    dest_dir: Optional[str] = None,
-) -> dict:
+# ── TOOL 5: manage_zip ───────────────────────────────────────────────────────
+def manage_zip(action: str, filename: str, files: Optional[list] = None,
+               internal_file: Optional[str] = None, dest_dir: Optional[str] = None) -> dict:
     """
-    Manajemen ZIP: list isi, extract, atau buat ZIP baru.
-
-    Args:
-        action:        'list' | 'extract' | 'create'
-        filename:      Path ke .zip file (relatif ke SANDBOX_ROOT).
-                       Untuk 'create', ini adalah nama output ZIP yang akan dibuat.
-        files:         (untuk action='create') List path file yang akan di-zip.
-        internal_file: (untuk action='extract') Nama file spesifik di dalam ZIP.
-                       Jika None, extract semua file.
-        dest_dir:      (untuk action='extract') Direktori tujuan ekstraksi.
-                       Default: subdirektori dengan nama yang sama dengan ZIP.
-
-    Returns dict tergantung action:
-
-        action='list':
-        {
-          "status": "ok",
-          "zip_file": str,
-          "total_files": int,
-          "entries": [{ "name": str, "size_bytes": int, "compressed_bytes": int,
-                        "is_dir": bool, "crc": int }]
-        }
-
-        action='extract':
-        {
-          "status": "ok",
-          "extracted_to": str,
-          "files_extracted": [str],
-          "total_extracted": int
-        }
-
-        action='create':
-        {
-          "status": "ok",
-          "zip_path": str,
-          "files_added": [str],
-          "total_size_bytes": int
-        }
-
-    Agent usage — Full Cycle:
-        1. manage_zip(action='list', filename='input.zip')
-           → Lihat isi ZIP, pilih file mana yang mau diproses
-        2. manage_zip(action='extract', filename='input.zip', dest_dir='extracted/')
-           → Extract ke sandbox
-        3. read_file('extracted/config.json')
-           → Baca file
-        4. write_file('extracted/config.json', modified_content)
-           → Simpan perubahan
-        5. manage_zip(action='create', filename='output.zip',
-                      files=['extracted/config.json', 'extracted/main.py'])
-           → Zip ulang
-        6. get_file_as_base64('output.zip') atau generate_download_link('output.zip')
-           → Kirim ke user
+    ZIP manager: action='list'|'extract'|'create'.
+    Tip: Setelah extract, LANGSUNG panggil list_files_recursive() untuk peta proyek.
+    Untuk create dengan direktori penuh, masukkan path direktori di 'files' — semua isinya ikut.
     """
     action = action.lower().strip()
-
-    # ── action: list ──────────────────────────────────────────────────────────
     if action == "list":
         try:
-            zip_path = _resolve(filename, must_exist=True)
+            zp = _resolve(filename, must_exist=True)
+            if not zipfile.is_zipfile(zp): return _err("Bukan ZIP valid", "INVALID_ZIP")
+            with zipfile.ZipFile(zp, "r") as zf:
+                entries = [{"name": i.filename, "size_bytes": i.file_size,
+                             "compressed_bytes": i.compress_size,
+                             "is_dir": i.filename.endswith("/"), "crc": i.CRC}
+                            for i in zf.infolist()]
+            return _ok({"zip_file": str(zp.relative_to(SANDBOX_ROOT)),
+                        "total_files": len(entries), "entries": entries})
+        except Exception as e: return _err(str(e), "ERROR")
 
-            if not zipfile.is_zipfile(zip_path):
-                return _err(f"Bukan file ZIP yang valid: {filename}", "INVALID_ZIP")
-
-            entries = []
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                for info in zf.infolist():
-                    entries.append({
-                        "name": info.filename,
-                        "size_bytes": info.file_size,
-                        "compressed_bytes": info.compress_size,
-                        "is_dir": info.filename.endswith("/"),
-                        "crc": info.CRC,
-                    })
-
-            return _ok({
-                "zip_file": str(zip_path.relative_to(SANDBOX_ROOT)),
-                "total_files": len(entries),
-                "entries": entries,
-            })
-
-        except FileNotFoundError as e:
-            return _err(str(e), "NOT_FOUND")
-        except zipfile.BadZipFile:
-            return _err(f"File ZIP korup atau tidak valid: {filename}", "BAD_ZIP")
-        except Exception as e:
-            return _err(f"manage_zip(list) gagal: {e}", "UNEXPECTED_ERROR")
-
-    # ── action: extract ───────────────────────────────────────────────────────
     elif action == "extract":
         try:
-            zip_path = _resolve(filename, must_exist=True)
-
-            if not zipfile.is_zipfile(zip_path):
-                return _err(f"Bukan file ZIP yang valid: {filename}", "INVALID_ZIP")
-
-            # Tentukan dest_dir
-            if dest_dir:
-                extract_to = _resolve(dest_dir)
-            else:
-                # Default: subfolder dengan nama ZIP (tanpa .zip)
-                stem = zip_path.stem
-                extract_to = _resolve(stem)
-
-            extract_to.mkdir(parents=True, exist_ok=True)
-
-            extracted_files = []
-            with zipfile.ZipFile(zip_path, "r") as zf:
+            zp = _resolve(filename, must_exist=True)
+            if not zipfile.is_zipfile(zp): return _err("Bukan ZIP valid", "INVALID_ZIP")
+            ext_to = _resolve(dest_dir) if dest_dir else _resolve(zp.stem)
+            ext_to.mkdir(parents=True, exist_ok=True)
+            extracted = []
+            with zipfile.ZipFile(zp, "r") as zf:
                 if internal_file:
-                    # Extract file spesifik
-                    try:
-                        zf.extract(internal_file, path=extract_to)
-                        extracted_files.append(internal_file)
-                    except KeyError:
-                        return _err(
-                            f"File '{internal_file}' tidak ditemukan di dalam ZIP.",
-                            "FILE_NOT_IN_ZIP"
-                        )
+                    zf.extract(internal_file, path=ext_to); extracted.append(internal_file)
                 else:
-                    # Extract semua file
-                    # Proteksi zip slip attack
-                    for member in zf.infolist():
-                        member_path = (extract_to / member.filename).resolve()
-                        try:
-                            member_path.relative_to(SANDBOX_ROOT)
-                        except ValueError:
-                            return _err(
-                                f"ZIP Slip attack terdeteksi pada entry: {member.filename}",
-                                "SECURITY_ERROR"
-                            )
-                        zf.extract(member, path=extract_to)
-                        if not member.filename.endswith("/"):
-                            extracted_files.append(member.filename)
+                    for m in zf.infolist():
+                        mp = (ext_to / m.filename).resolve()
+                        try: mp.relative_to(SANDBOX_ROOT)
+                        except ValueError: return _err(f"ZIP Slip: {m.filename}", "SECURITY_ERROR")
+                        zf.extract(m, path=ext_to)
+                        if not m.filename.endswith("/"): extracted.append(m.filename)
+            return _ok({"extracted_to": str(ext_to.relative_to(SANDBOX_ROOT)),
+                        "files_extracted": extracted, "total_extracted": len(extracted),
+                        "next_step": "Panggil list_files_recursive() pada 'extracted_to' untuk memetakan proyek."})
+        except Exception as e: return _err(str(e), "ERROR")
 
-            return _ok({
-                "extracted_to": str(extract_to.relative_to(SANDBOX_ROOT)),
-                "files_extracted": extracted_files,
-                "total_extracted": len(extracted_files),
-            })
-
-        except FileNotFoundError as e:
-            return _err(str(e), "NOT_FOUND")
-        except zipfile.BadZipFile:
-            return _err(f"File ZIP korup: {filename}", "BAD_ZIP")
-        except PermissionError as e:
-            return _err(str(e), "PERMISSION_DENIED")
-        except Exception as e:
-            return _err(f"manage_zip(extract) gagal: {e}", "UNEXPECTED_ERROR")
-
-    # ── action: create ────────────────────────────────────────────────────────
     elif action == "create":
+        if not files: return _err("'files' wajib untuk action='create'", "MISSING_PARAMETER")
         try:
-            if not files or not isinstance(files, list):
-                return _err(
-                    "Parameter 'files' harus berupa list path file untuk action='create'.",
-                    "MISSING_PARAMETER"
-                )
-
-            zip_out = _resolve(filename)
-            zip_out.parent.mkdir(parents=True, exist_ok=True)
-
-            added_files = []
-            total_size = 0
-
-            with zipfile.ZipFile(zip_out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zout = _resolve(filename)
+            zout.parent.mkdir(parents=True, exist_ok=True)
+            added, total = [], 0
+            with zipfile.ZipFile(zout, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for f in files:
-                    try:
-                        file_path = _resolve(f, must_exist=True)
-                        arcname = file_path.name  # Simpan tanpa full path
-                        zf.write(file_path, arcname=arcname)
-                        added_files.append(arcname)
-                        total_size += file_path.stat().st_size
-                    except FileNotFoundError:
-                        return _err(f"File tidak ditemukan saat buat ZIP: {f}", "FILE_NOT_FOUND")
-
-            return _ok({
-                "zip_path": str(zip_out.relative_to(SANDBOX_ROOT)),
-                "absolute_path": str(zip_out),
-                "files_added": added_files,
-                "total_files": len(added_files),
-                "total_size_bytes": total_size,
-                "zip_size_bytes": zip_out.stat().st_size,
-            })
-
-        except PermissionError as e:
-            return _err(str(e), "PERMISSION_DENIED")
-        except Exception as e:
-            return _err(f"manage_zip(create) gagal: {e}", "UNEXPECTED_ERROR")
-
+                    fp = _resolve(f, must_exist=True)
+                    if fp.is_dir():
+                        for sub in fp.rglob("*"):
+                            if sub.is_file():
+                                arc = str(sub.relative_to(SANDBOX_ROOT))
+                                zf.write(sub, arcname=arc); added.append(arc); total += sub.stat().st_size
+                    else:
+                        arc = str(fp.relative_to(SANDBOX_ROOT))
+                        zf.write(fp, arcname=arc); added.append(arc); total += fp.stat().st_size
+            return _ok({"zip_path": str(zout.relative_to(SANDBOX_ROOT)),
+                        "files_added": added, "total_files": len(added),
+                        "total_size_bytes": total, "zip_size_bytes": zout.stat().st_size})
+        except Exception as e: return _err(str(e), "ERROR")
     else:
-        return _err(
-            f"Action tidak dikenal: '{action}'. Gunakan: 'list', 'extract', atau 'create'.",
-            "INVALID_ACTION"
-        )
+        return _err(f"Action tidak dikenal: '{action}'", "INVALID_ACTION")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 5 — get_file_as_base64
-# ─────────────────────────────────────────────────────────────────────────────
+# ── TOOL 6: search_in_files ★ ───────────────────────────────────────────────
+def search_in_files(query: str, directory: str = ".", extensions: Optional[List[str]] = None,
+                    case_sensitive: bool = False, max_results: int = 100) -> dict:
+    """
+    ★ GREP AGENT — Cari teks/regex di semua file secara rekursif.
+    Gunakan sebelum refactoring untuk menemukan SEMUA lokasi yang perlu di-patch.
+    Filter ekstensi dengan extensions=['.py','.js'] untuk fokus ke source code.
+    """
+    try:
+        target = _resolve(directory)
+        if not target.exists(): return _err(f"Tidak ditemukan: {directory}", "NOT_FOUND")
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try: pattern = re.compile(query, flags)
+        except re.error as e: return _err(f"Regex tidak valid: {e}", "INVALID_REGEX")
 
+        results, files_searched = [], 0
+        for fp in target.rglob("*"):
+            if not fp.is_file(): continue
+            if extensions and fp.suffix.lower() not in [e.lower() for e in extensions]: continue
+            if fp.stat().st_size > MAX_READ_BYTES: continue
+            for enc in ("utf-8", "utf-8-sig", "latin-1"):
+                try:
+                    text = fp.read_text(encoding=enc); files_searched += 1
+                    for lineno, line in enumerate(text.splitlines(), 1):
+                        m = pattern.search(line)
+                        if m:
+                            results.append({"file": str(fp.relative_to(SANDBOX_ROOT)),
+                                            "line_number": lineno, "line_content": line.strip(),
+                                            "match": m.group(0)})
+                            if len(results) >= max_results:
+                                return _ok({"query": query, "total_matches": len(results),
+                                            "files_searched": files_searched, "truncated": True, "results": results})
+                    break
+                except UnicodeDecodeError: continue
+        return _ok({"query": query, "total_matches": len(results),
+                    "files_searched": files_searched, "truncated": False, "results": results})
+    except Exception as e: return _err(str(e), "ERROR")
+
+
+# ── TOOL 7: move_or_rename_file ★ ───────────────────────────────────────────
+def move_or_rename_file(source: str, destination: str) -> dict:
+    """Pindah atau rename file/direktori dalam sandbox."""
+    try:
+        src = _resolve(source, must_exist=True); dst = _resolve(destination)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        return _ok({"source": source, "destination": str(dst.relative_to(SANDBOX_ROOT)),
+                    "type": "directory" if dst.is_dir() else "file"})
+    except FileNotFoundError as e: return _err(str(e), "NOT_FOUND")
+    except Exception as e:         return _err(str(e), "ERROR")
+
+
+# ── TOOL 8: delete_file ★ ────────────────────────────────────────────────────
+def delete_file(filepath: str, force: bool = False) -> dict:
+    """
+    Hapus file atau direktori. force=True untuk hapus direktori beserta isinya (rm -rf).
+    """
+    try:
+        t = _resolve(filepath, must_exist=True)
+        if t.is_file():   t.unlink()
+        elif t.is_dir():  shutil.rmtree(t) if force else t.rmdir()
+        else:             return _err(f"Bukan file/dir: {filepath}", "UNKNOWN_TYPE")
+        return _ok({"deleted": filepath, "force": force})
+    except OSError as e:
+        if "not empty" in str(e).lower():
+            return _err("Direktori tidak kosong. Gunakan force=True.", "DIR_NOT_EMPTY")
+        return _err(str(e), "OS_ERROR")
+    except Exception as e: return _err(str(e), "ERROR")
+
+
+# ── TOOL 9: get_file_as_base64 ──────────────────────────────────────────────
 def get_file_as_base64(filename: str) -> dict:
-    """
-    Encode file ke Base64 agar Agent bisa "print" ke UI.
-    Frontend mendeteksi marker [FILE_EXPORT:...] dan render tombol download.
-
-    Args:
-        filename: Path file relatif ke SANDBOX_ROOT.
-
-    Returns:
-        {
-          "status": "ok",
-          "filename": str,
-          "mime_type": str,
-          "size_bytes": int,
-          "base64_data": str,
-          "export_marker": str,   ← tulis ini di Final Answer
-          "instruction": str
-        }
-
-    Agent usage:
-        Setelah file siap, panggil ini dan sertakan 'export_marker'
-        PERSIS di dalam Final Answer. UI akan render tombol download otomatis.
-
-    Marker format yang dikenali UI:
-        [FILE_EXPORT:{filename}:{base64_data}:{mime_type}]
-    """
+    """Encode file ke Base64. Sertakan 'export_marker' di Final Answer untuk tombol download."""
     try:
-        target = _resolve(filename, must_exist=True)
-
-        if not target.is_file():
-            return _err(f"Bukan file: {filename}", "NOT_A_FILE")
-
-        size = target.stat().st_size
+        t = _resolve(filename, must_exist=True)
+        if not t.is_file(): return _err(f"Bukan file: {filename}", "NOT_A_FILE")
+        size = t.stat().st_size
         if size > MAX_EXPORT_BYTES:
-            return _err(
-                f"File terlalu besar ({size // 1024 // 1024}MB) untuk Base64 export. "
-                f"Gunakan generate_download_link sebagai gantinya.",
-                "FILE_TOO_LARGE"
-            )
-
-        mime, _ = mimetypes.guess_type(str(target))
-        mime = mime or "application/octet-stream"
-
-        raw = target.read_bytes()
-        b64 = base64.b64encode(raw).decode("utf-8")
-
-        marker = f"[FILE_EXPORT:{target.name}:{b64}:{mime}]"
-
-        return _ok({
-            "filename": target.name,
-            "mime_type": mime,
-            "size_bytes": size,
-            "base64_data": b64,
-            "export_marker": marker,
-            "instruction": (
-                f"Sertakan export_marker ini PERSIS di Final Answer kamu "
-                f"agar UI merender tombol download untuk file '{target.name}'."
-            ),
-        })
-
-    except FileNotFoundError as e:
-        return _err(str(e), "NOT_FOUND")
-    except PermissionError as e:
-        return _err(str(e), "PERMISSION_DENIED")
-    except Exception as e:
-        return _err(f"get_file_as_base64 gagal: {e}", "UNEXPECTED_ERROR")
+            return _err(f"Terlalu besar ({size//1024//1024}MB). Gunakan generate_download_link.", "FILE_TOO_LARGE")
+        mime = mimetypes.guess_type(str(t))[0] or "application/octet-stream"
+        b64  = base64.b64encode(t.read_bytes()).decode()
+        mark = f"[FILE_EXPORT:{t.name}:{b64}:{mime}]"
+        return _ok({"filename": t.name, "mime_type": mime, "size_bytes": size,
+                    "base64_data": b64, "export_marker": mark,
+                    "instruction": f"Sertakan export_marker PERSIS di Final Answer untuk render tombol download '{t.name}'."})
+    except Exception as e: return _err(str(e), "ERROR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL 6 — generate_download_link
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── TOOL 10: generate_download_link ─────────────────────────────────────────
 def generate_download_link(filename: str) -> dict:
-    """
-    Copy file ke EXPORT_DIR dan generate URL download yang bisa diklik user.
-    Cocok untuk file besar atau UX yang lebih clean dibanding Base64.
-
-    Args:
-        filename: Path file relatif ke SANDBOX_ROOT.
-
-    Returns:
-        {
-          "status": "ok",
-          "filename": str,
-          "download_url": str,
-          "token": str,
-          "export_path": str,
-          "size_bytes": int,
-          "mime_type": str,
-          "export_marker": str,   ← tulis ini di Final Answer
-          "instruction": str
-        }
-
-    Marker format yang dikenali UI:
-        [FILE_LINK:{filename}:{download_url}]
-
-    Note:
-        Asumsi ada static file server atau /api/download/{token} handler.
-        Di Vercel, gunakan api/download.py yang serve dari EXPORT_DIR.
-        Jika tidak ada server, otomatis fallback ke Base64 bridge.
-    """
+    """Generate URL download. Sertakan 'export_marker' di Final Answer."""
     try:
-        source = _resolve(filename, must_exist=True)
-
-        if not source.is_file():
-            return _err(f"Bukan file: {filename}", "NOT_A_FILE")
-
-        size = source.stat().st_size
-        mime, _ = mimetypes.guess_type(str(source))
-        mime = mime or "application/octet-stream"
-
-        # Generate unique token
-        token = uuid.uuid4().hex[:16]
-        export_filename = f"{token}_{source.name}"
-        export_path = EXPORT_DIR / export_filename
-
-        # Copy ke export dir
-        shutil.copy2(source, export_path)
-
-        # Simpan metadata JSON untuk download handler
-        meta_path = EXPORT_DIR / f"{token}.meta.json"
-        meta = {
-            "token": token,
-            "original_filename": source.name,
-            "export_filename": export_filename,
-            "mime_type": mime,
-            "size_bytes": size,
-        }
-        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
-
-        # Build URL
-        base = BASE_URL.rstrip("/")
-        download_url = f"{base}/api/download/{token}"
-
-        marker = f"[FILE_LINK:{source.name}:{download_url}]"
-
-        return _ok({
-            "filename": source.name,
-            "download_url": download_url,
-            "token": token,
-            "export_path": str(export_path),
-            "size_bytes": size,
-            "mime_type": mime,
-            "export_marker": marker,
-            "instruction": (
-                f"Sertakan export_marker ini di Final Answer: {marker} "
-                f"UI akan render tombol download dengan URL: {download_url}"
-            ),
-        })
-
-    except FileNotFoundError as e:
-        return _err(str(e), "NOT_FOUND")
-    except PermissionError as e:
-        return _err(str(e), "PERMISSION_DENIED")
-    except Exception as e:
-        return _err(f"generate_download_link gagal: {e}", "UNEXPECTED_ERROR")
+        src  = _resolve(filename, must_exist=True)
+        if not src.is_file(): return _err(f"Bukan file: {filename}", "NOT_A_FILE")
+        mime = mimetypes.guess_type(str(src))[0] or "application/octet-stream"
+        tok  = uuid.uuid4().hex[:16]
+        ep   = EXPORT_DIR / f"{tok}_{src.name}"
+        shutil.copy2(src, ep)
+        (EXPORT_DIR / f"{tok}.meta.json").write_text(
+            json.dumps({"token": tok, "original_filename": src.name,
+                        "export_filename": ep.name, "mime_type": mime,
+                        "size_bytes": src.stat().st_size}, indent=2))
+        url  = f"{BASE_URL.rstrip('/')}/api/download/{tok}"
+        mark = f"[FILE_LINK:{src.name}:{url}]"
+        return _ok({"filename": src.name, "download_url": url, "token": tok,
+                    "export_path": str(ep), "size_bytes": src.stat().st_size,
+                    "mime_type": mime, "export_marker": mark,
+                    "instruction": f"Sertakan di Final Answer: {mark}"})
+    except Exception as e: return _err(str(e), "ERROR")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DISPATCHER — untuk integrasi langsung ke ToolRegistry existing
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── DISPATCHER ───────────────────────────────────────────────────────────────
 TOOL_MAP = {
-    "list_files": list_files,
-    "read_file": read_file,
-    "write_file": write_file,
-    "manage_zip": manage_zip,
-    "get_file_as_base64": get_file_as_base64,
+    "list_files_recursive":   list_files_recursive,
+    "list_files":             list_files,
+    "read_file":              read_file,
+    "write_file":             write_file,
+    "manage_zip":             manage_zip,
+    "search_in_files":        search_in_files,
+    "move_or_rename_file":    move_or_rename_file,
+    "delete_file":            delete_file,
+    "get_file_as_base64":     get_file_as_base64,
     "generate_download_link": generate_download_link,
 }
 
-
 def dispatch(tool_name: str, args: dict) -> dict:
-    """
-    Central dispatcher. Panggil dari executor:
-        result = dispatch("manage_zip", {"action": "list", "filename": "data.zip"})
-    """
     fn = TOOL_MAP.get(tool_name)
-    if fn is None:
-        return _err(f"Tool tidak dikenal: '{tool_name}'", "UNKNOWN_TOOL")
-    try:
-        return fn(**args)
-    except TypeError as e:
-        return _err(f"Argumen salah untuk '{tool_name}': {e}", "BAD_ARGUMENTS")
-    except Exception as e:
-        return _err(f"Tool '{tool_name}' crash: {e}", "RUNTIME_ERROR")
+    if not fn: return _err(f"Tool tidak dikenal: '{tool_name}'", "UNKNOWN_TOOL")
+    try:    return fn(**args)
+    except TypeError as e: return _err(f"Argumen salah untuk '{tool_name}': {e}", "BAD_ARGUMENTS")
+    except Exception as e: return _err(f"'{tool_name}' crash: {e}", "RUNTIME_ERROR")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# QUICK TEST — jalankan langsung: python file_manager.py
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Quick smoke test
     import textwrap
-
-    def _pp(label, result):
-        print(f"\n{'─'*60}")
-        print(f"▶ {label}")
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-    print("=" * 60)
-    print("  File Manager Suite — Quick Test")
-    print(f"  Sandbox: {SANDBOX_ROOT}")
-    print("=" * 60)
-
-    # 1. Write beberapa file
-    _pp("write_file: hello.txt", write_file("hello.txt", "Hello dari GazccAgent!\nLine 2."))
-    _pp("write_file: config.json", write_file("config.json", json.dumps({"version": "1.0", "debug": True}, indent=2)))
-
-    # 2. List files
-    _pp("list_files: .", list_files("."))
-
-    # 3. Read file
-    _pp("read_file: hello.txt", read_file("hello.txt"))
-
-    # 4. Create ZIP
-    _pp("manage_zip: create", manage_zip("create", "bundle.zip", files=["hello.txt", "config.json"]))
-
-    # 5. List ZIP
-    _pp("manage_zip: list", manage_zip("list", "bundle.zip"))
-
-    # 6. Extract ZIP
-    _pp("manage_zip: extract", manage_zip("extract", "bundle.zip", dest_dir="extracted/"))
-
-    # 7. Read extracted file
-    _pp("read_file: extracted/hello.txt", read_file("extracted/hello.txt"))
-
-    # 8. Modify & re-write
-    _pp("write_file: extracted/hello.txt (modified)", write_file("extracted/hello.txt", "MODIFIED oleh Agent!"))
-
-    # 9. Create new ZIP dari modified files
-    _pp("manage_zip: create output.zip", manage_zip("create", "output.zip", files=["extracted/hello.txt", "extracted/config.json"]))
-
-    # 10. Export Base64
-    result = get_file_as_base64("output.zip")
-    result_short = {**result}
-    if "base64_data" in result_short:
-        result_short["base64_data"] = result_short["base64_data"][:80] + "...[truncated]"
-    if "export_marker" in result_short:
-        result_short["export_marker"] = result_short["export_marker"][:80] + "...[truncated]"
-    _pp("get_file_as_base64: output.zip (truncated)", result_short)
-
-    # 11. Download link
-    _pp("generate_download_link: output.zip", generate_download_link("output.zip"))
-
-    print(f"\n{'='*60}")
-    print("  ✓ Semua tool berhasil dieksekusi.")
-    print("=" * 60)
+    write_file("test/hello.py", "def greet():\n    return 'Hello World'\n")
+    write_file("test/config.json", '{"version": "2.0"}')
+    result = list_files_recursive("test")
+    print(result["tree"])
+    hits = search_in_files("def ", "test", [".py"])
+    print(f"search hits: {hits['total_matches']}")
+    manage_zip("create", "test_bundle.zip", files=["test"])
+    print("ZIP created:", manage_zip("list", "test_bundle.zip")["total_files"], "files")
+    print("All tools OK ✓")

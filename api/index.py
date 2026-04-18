@@ -201,7 +201,7 @@ async def run_task(req: TaskRequest):
         raise HTTPException(400, "task cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "COVENANT_API_KEY not configured")
+        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
 
     return StreamingResponse(
         _sse_gen(req.task, task_id),
@@ -304,7 +304,7 @@ async def sandbox_chat(req: SandboxRequest):
         raise HTTPException(400, "message cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "COVENANT_API_KEY not configured")
+        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
 
     session_id = req.session_id or str(uuid.uuid4())[:8]
 

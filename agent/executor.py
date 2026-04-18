@@ -20,29 +20,55 @@ from .tools import ToolRegistry, ToolResult
 # ── ReAct prompt ──────────────────────────────────────────────────────────────
 
 REACT_SYSTEM = """\
-You are GazccThinking, an autonomous AI agent. You execute tasks using available tools.
+You are GazccAgent Pro, operating as a Strategic Partner — not just an executor.
+You combine two internal voices:
+
+[EXECUTOR] — Gets things done. Uses tools efficiently. Delivers concrete results.
+[CRITIC]   — Senior Architect mindset. Reviews EXECUTOR's work. Catches:
+              • Architectural flaws (wrong abstraction, fragile design)
+              • Missing error handling or edge cases
+              • Opportunities for reuse or simplification
+              • Security / correctness issues
+              The CRITIC proposes SPECIFIC fixes, not vague complaints.
 
 AVAILABLE TOOLS:
 {tool_schema}
 
 FORMAT — use EXACTLY this format, one block at a time:
 
-Thought: [your reasoning about what to do next]
+Thought: [EXECUTOR reasoning about what to do next]
 Action: [tool_name]
 Action Input: [JSON object with tool arguments]
 
-After receiving an Observation, emit the next Thought/Action/Action Input block.
-When the step is fully complete, emit:
+After an Observation, optionally add a CRITIC review:
+Critic: [architectural observation or improvement — skip if nothing to add]
 
-Thought: [final reasoning]
-Final Answer: [complete result of this step]
+Then continue with next Thought/Action or conclude:
+
+Thought: [final synthesis]
+Final Answer: [complete result — include any CRITIC-suggested improvements inline]
 
 RULES:
 - Action Input MUST be valid JSON
 - Never repeat a failed Action with the same input — change strategy
-- If a tool fails twice, try a different approach or use what you already know
-- Final Answer should be complete and useful for the next step
+- CRITIC should speak after significant steps, not trivially
+- If CRITIC identifies a flaw, EXECUTOR must address it before Final Answer
+- Final Answer should be complete, reviewed, and production-quality
 - Be concise in Thoughts; be thorough in Final Answers
+"""
+
+CRITIC_REVIEW_PROMPT = """\
+You are a Senior Software Architect reviewing this work:
+
+STEP: {step}
+RESULT: {result}
+
+Provide a BRIEF architectural critique (2-3 sentences max):
+1. Is there a structural flaw, missing case, or fragile assumption?
+2. If yes: propose ONE specific, actionable improvement.
+3. If the work is solid, say "LGTM — no architectural concerns."
+
+Be specific. Avoid vague praise. Respond directly without preamble.
 """
 
 REACT_USER = """\
@@ -61,18 +87,24 @@ Execute this step now. Think step by step.
 # ── parse ReAct output ────────────────────────────────────────────────────────
 
 def _parse_react(text: str) -> dict:
-    """Returns dict with keys: thought, action, action_input, final_answer."""
+    """Returns dict with keys: thought, action, action_input, final_answer, critic."""
     result: dict[str, Any] = {
         "thought": "",
         "action": None,
         "action_input": {},
         "final_answer": None,
+        "critic": "",
     }
 
     # Extract Thought
-    m = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|$)", text, re.DOTALL | re.IGNORECASE)
+    m = re.search(r"Thought:\s*(.+?)(?=\nAction:|\nFinal Answer:|\nCritic:|$)", text, re.DOTALL | re.IGNORECASE)
     if m:
         result["thought"] = m.group(1).strip()
+
+    # Extract Critic
+    critic = re.search(r"Critic:\s*(.+?)(?=\nThought:|\nAction:|\nFinal Answer:|$)", text, re.DOTALL | re.IGNORECASE)
+    if critic:
+        result["critic"] = critic.group(1).strip()
 
     # Extract Final Answer
     fa = re.search(r"Final Answer:\s*([\s\S]+)$", text, re.IGNORECASE)
@@ -92,7 +124,6 @@ def _parse_react(text: str) -> dict:
         try:
             result["action_input"] = json.loads(raw_json)
         except json.JSONDecodeError:
-            # Try to extract key-value pairs loosely
             result["action_input"] = {"_raw": raw_json}
 
     return result

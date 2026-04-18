@@ -17,6 +17,12 @@ from .executor import StepExecutor
 from .memory import FileMemory, RedisMemory, TaskState, build_memory
 from .planner import Plan, Planner, Step
 from .tools import ToolRegistry
+from .strategic_tools import (
+    SemanticMemoryTool,
+    ProactiveMonitorTool,
+    ApiBridgeTool,
+    SandboxExecutorTool,
+)
 
 logger = logging.getLogger("gazcc.agent")
 logging.basicConfig(
@@ -96,8 +102,18 @@ class GazccAgent:
         # Build components
         self._memory = build_memory(cfg.get("memory", {}))
         self._tools = ToolRegistry(cfg)
+
+        # ── Register Strategic Tools
+        _mem_path = cfg.get("memory", {}).get("file_path", "/tmp/gazcc_memory")
+        _sem_mem = SemanticMemoryTool(memory_path=_mem_path + "_semantic")
+        self._tools.register(_sem_mem)
+        self._tools.register(ProactiveMonitorTool())
+        self._tools.register(ApiBridgeTool())
+        self._tools.register(SandboxExecutorTool())
+
         self._planner = Planner(self._llm_cfg, self._tools.schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)
+        self._sem_mem = _sem_mem  # direct reference for pre-task memory recall
 
         self._events: list[AgentEvent] = []
         self._event_callbacks: list[Callable[[AgentEvent], None]] = []
@@ -141,6 +157,14 @@ class GazccAgent:
             else:
                 # ── 3. plan ────────────────────────────────────────────────
                 yield self._emit("planning", {"msg": "Decomposing task..."})
+
+                # Inject past memory context into planner (Contextual Memory Integration)
+                mem_ctx = await self._memory.search(task, top_k=3)
+                mem_ctx_text = "\n".join(
+                    f"[{e.key}]: {e.content[:200]}" for e in mem_ctx
+                )
+                self._planner.set_memory_context(mem_ctx_text)
+
                 plan = await asyncio.wait_for(
                     self._planner.decompose(task),
                     timeout=60,
@@ -149,6 +173,22 @@ class GazccAgent:
                     "goal": plan.goal,
                     "steps": [s.to_dict() for s in plan.steps],
                 })
+
+                # ── Proactive Agency: suggest related tasks ────────────────
+                step_descs = [s.description for s in plan.steps]
+                try:
+                    suggestions = await asyncio.wait_for(
+                        self._planner.get_proactive_suggestions(task, step_descs),
+                        timeout=30,
+                    )
+                    if suggestions:
+                        yield self._emit("proactive_suggestions", {
+                            "msg": "Strategic Partner detected related tasks you may want to consider:",
+                            "suggestions": suggestions,
+                        })
+                except Exception:
+                    pass  # Non-critical — don't block execution
+
                 await self._save_checkpoint(state_store, plan)
 
             # ── 4. execution loop ──────────────────────────────────────────

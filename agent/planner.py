@@ -90,22 +90,47 @@ class Plan:
 # ── Planner ───────────────────────────────────────────────────────────────────
 
 PLAN_PROMPT = """\
-You are a task planning AI. Decompose the following task into concrete, ordered steps.
+You are GazccAgent Pro — a Strategic Planning AI operating as a Senior Architect.
+Your job is NOT just to list steps. Your job is to create a ROBUST, FAILURE-AWARE plan.
 
 TASK: {task}
 
 AVAILABLE TOOLS:
 {tools}
 
-OUTPUT — respond ONLY with valid JSON in this exact structure:
+PAST CONTEXT (user preferences & prior outcomes):
+{memory_context}
+
+══════════════════════════════════════════════════════
+PHASE 1 — PRE-MORTEM ANALYSIS (think before you plan)
+══════════════════════════════════════════════════════
+Before writing steps, identify:
+  a) The most likely single point of failure in this task
+  b) Any ambiguity in the request that could derail execution
+  c) Whether any step can be parallelized (depends_on: [])
+  d) Whether the user's request implies additional related work
+     (e.g. "write a script" implies tests, requirements.txt, docs)
+
+══════════════════════════════════════════════════════
+PHASE 2 — STRUCTURED PLAN OUTPUT
+══════════════════════════════════════════════════════
+OUTPUT — respond ONLY with valid JSON:
 {{
   "goal": "one-sentence description of the end goal",
+  "premortem": {{
+    "main_risk": "the most likely failure point",
+    "ambiguities": ["list of unclear aspects"],
+    "contingency": "fallback if main_risk occurs",
+    "implied_tasks": ["related tasks not explicitly requested but valuable"]
+  }},
   "steps": [
     {{
       "id": 1,
       "description": "exact action to perform",
       "depends_on": [],
-      "tool_hint": "tool_name or empty string"
+      "tool_hint": "tool_name or empty string",
+      "risk_level": "low|medium|high",
+      "contingency_note": "what to do if this step fails"
     }},
     ...
   ]
@@ -116,9 +141,35 @@ RULES:
 - depends_on lists step IDs that MUST complete before this step
 - tool_hint should match an available tool name exactly, or be empty
 - Minimum 2 steps, maximum 15 steps
-- Steps that can run independently should NOT depend on each other
-- The final step should always produce or summarize the output
+- Steps that can run in parallel MUST have empty depends_on
+- The final step must always produce or summarize the output
+- Use proactive_monitor tool early in the plan to catch missed steps
 - Respond ONLY with JSON — no markdown, no explanation
+"""
+
+PROACTIVE_SUGGESTION_PROMPT = """\
+You are GazccAgent Pro. A user just asked:
+  "{task}"
+
+The plan covers these steps:
+{steps}
+
+Are there RELATED TASKS that a senior engineer would STRONGLY RECOMMEND doing alongside this?
+Consider: testing, documentation, error handling, deployment, monitoring, cleanup.
+
+Respond ONLY with valid JSON:
+{{
+  "should_suggest": true/false,
+  "suggestions": [
+    {{
+      "task": "short task description",
+      "reason": "why this adds value",
+      "priority": "high|medium|low"
+    }}
+  ]
+}}
+
+Only suggest if genuinely valuable. Max 3 suggestions. Respond with JSON only.
 """
 
 
@@ -129,11 +180,37 @@ class Planner:
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
         self._model = llm_cfg.get("model", "google/gemma-4-26b-a4b-it")
         self._api_key = llm_cfg.get("api_key", "")
+        self._memory_context = ""  # injected by agent from semantic memory
+
+    def set_memory_context(self, ctx: str):
+        """Called by the agent to inject relevant past context before planning."""
+        self._memory_context = ctx[:2000] if ctx else "(no prior context)"
 
     async def decompose(self, task: str) -> Plan:
-        prompt = PLAN_PROMPT.format(task=task, tools=self._tool_schema)
+        prompt = PLAN_PROMPT.format(
+            task=task,
+            tools=self._tool_schema,
+            memory_context=self._memory_context or "(no prior context)",
+        )
         raw = await self._call_llm(prompt)
         return self._parse_plan(task, raw)
+
+    async def get_proactive_suggestions(self, task: str, steps: list) -> list:
+        """Ask LLM if there are implied follow-on tasks the user should know about."""
+        prompt = PROACTIVE_SUGGESTION_PROMPT.format(
+            task=task,
+            steps="\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps)),
+        )
+        try:
+            raw = await self._call_llm(prompt)
+            clean = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.MULTILINE)
+            clean = re.sub(r"\s*```$", "", clean.strip(), flags=re.MULTILINE)
+            data = json.loads(clean)
+            if data.get("should_suggest"):
+                return data.get("suggestions", [])
+        except Exception:
+            pass
+        return []
 
     async def _call_llm(self, prompt: str) -> str:
         # OpenRouter API: POST /v1/chat/completions (OpenAI-compatible)

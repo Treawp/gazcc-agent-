@@ -4,9 +4,16 @@ from .tools import ToolRegistry
 from .planner import Planner, Plan, Step
 from .executor import StepExecutor
 from .sandbox import SandboxExecutor, SandboxEvent
+from .strategic_tools import (
+    SemanticMemoryTool,
+    ProactiveMonitorTool,
+    ApiBridgeTool,
+    SandboxExecutorTool,
+)
 
 __all__ = [
     "GazccAgent", "AgentResult", "AgentEvent",
     "build_memory", "ToolRegistry", "Planner", "Plan", "Step", "StepExecutor",
     "SandboxExecutor", "SandboxEvent",
+    "SemanticMemoryTool", "ProactiveMonitorTool", "ApiBridgeTool", "SandboxExecutorTool",
 ]

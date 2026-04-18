@@ -647,3 +647,7 @@ class ToolRegistry:
             return ToolResult(False, f"Bad arguments for {name}: {e}")
         except Exception as e:
             return ToolResult(False, f"Tool {name} crashed: {e}")
+
+    def register(self, tool: "BaseTool"):
+        """Public method to register additional tools (e.g. strategic tools)."""
+        self._tools[tool.name] = tool

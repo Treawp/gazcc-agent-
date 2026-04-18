@@ -23,6 +23,7 @@ from .strategic_tools import (
     ApiBridgeTool,
     SandboxExecutorTool,
 )
+from .gazcc_tools_expansion import register_expansion_tools
 
 logger = logging.getLogger("gazcc.agent")
 logging.basicConfig(
@@ -110,6 +111,9 @@ class GazccAgent:
         self._tools.register(ProactiveMonitorTool())
         self._tools.register(ApiBridgeTool())
         self._tools.register(SandboxExecutorTool())
+
+        # ── Register Expansion Tools (CodeTranslator, ImageMetadata, etc.)
+        register_expansion_tools(self._tools, self._cfg)
 
         self._planner = Planner(self._llm_cfg, self._tools.schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)

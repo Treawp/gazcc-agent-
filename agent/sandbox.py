@@ -236,8 +236,8 @@ class SandboxExecutor:
     def __init__(self, cfg: dict):
         self._llm_cfg = cfg.get("llm", {})
         self._tools = SandboxTools(cfg)
-        self._base_url = self._llm_cfg.get("base_url", "https://app.covenant.sbs/v1")
-        self._model = self._llm_cfg.get("model", "deepseek")
+        self._base_url = self._llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
+        self._model = self._llm_cfg.get("model", "google/gemma-4-26b-a4b-it")
         self._api_key = self._llm_cfg.get("api_key", "")
         self._history: list[dict] = []
         self._memory: dict[str, str] = {}

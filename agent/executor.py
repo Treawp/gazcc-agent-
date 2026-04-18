@@ -107,8 +107,8 @@ class StepExecutor:
         self._cfg = llm_cfg
         self._tools = tools
         self._retry_limit = retry_limit
-        self._base_url = llm_cfg.get("base_url", "https://app.covenant.sbs/v1")
-        self._model = llm_cfg.get("model", "deepseek")
+        self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
+        self._model = llm_cfg.get("model", "google/gemma-4-26b-a4b-it")
         self._api_key = llm_cfg.get("api_key", "")
 
     async def execute_step(
@@ -191,36 +191,26 @@ class StepExecutor:
         return False, "Max ReAct turns reached without completion."
 
     async def _call_llm(self, messages: list[dict], retry: int = 0) -> str:
+        # OpenRouter API: POST /v1/chat/completions (OpenAI-compatible)
+        url = f"{self._base_url.rstrip('/')}/chat/completions"
         headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/gazcc",
+            "X-Title": "GazccThinking",
         }
-        # Covenant API: GET with ?question=... dan x-api-key header
-        # Convert messages array → single question string
-        system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
-        convo_parts = []
-        for m in messages:
-            if m["role"] == "system":
-                continue
-            role_label = "User" if m["role"] == "user" else "Assistant"
-            convo_parts.append(f"{role_label}: {m['content']}")
-        question = "\n".join(convo_parts)
-
-        params: dict = {"question": question, "model": self._model}
-        if system_msg:
-            params["system"] = system_msg
-
-        headers = {"x-api-key": self._api_key}
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": 4000,
+            "temperature": 0.1,
+        }
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.get(
-                    self._base_url,
-                    params=params,
-                    headers=headers,
-                )
+                resp = await client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
-                if isinstance(data, dict):
-                    return data.get("result") or data.get("response") or data.get("message") or str(data)
-                return str(data)
+                return data["choices"][0]["message"]["content"]
         except (httpx.HTTPStatusError, httpx.TimeoutException, KeyError) as e:
             if retry < self._retry_limit:
                 await asyncio.sleep(2 ** retry)

@@ -237,7 +237,7 @@ class StepExecutor:
 
         full_output_parts: list[str] = []
         current_messages = list(messages)
-        MAX_CONTINUATION_ROUNDS = 6
+        MAX_CONTINUATION_ROUNDS = 3
 
         for continuation_round in range(MAX_CONTINUATION_ROUNDS):
             payload = {
@@ -258,8 +258,9 @@ class StepExecutor:
 
                 full_output_parts.append(content)
 
-                # If model finished naturally, we're done
-                if finish_reason != "length":
+                combined = "".join(full_output_parts)
+                # Stop kalau selesai natural ATAU udah ada Final Answer di output
+                if finish_reason != "length" or "Final Answer:" in combined:
                     break
 
                 # Output was truncated — notify frontend and continue

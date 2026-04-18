@@ -526,3 +526,53 @@ async def proxy_chat(
         return JSONResponse({"status": False, "message": f"OpenRouter HTTP {e.response.status_code}: {e.response.text[:200]}"})
     except Exception as e:
         return JSONResponse({"status": False, "message": str(e)})
+
+
+# ── /api/download/{token} — serve exported files ──────────────────────────────
+
+import base64 as _base64
+from fastapi.responses import Response as _Response
+
+@app.get("/api/download/{token}")
+async def download_file(token: str):
+    """
+    Serve file yang disimpan Agent di Redis via export_file_link tool.
+    Token di-generate Agent, berlaku 1 jam.
+    """
+    redis_url   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+    redis_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+    if not redis_url or not redis_token:
+        raise HTTPException(404, "File storage not configured (Redis unavailable)")
+
+    redis_key = f"gazcc_export:{token}"
+    try:
+        async with _httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"{redis_url}/get/{redis_key}",
+                headers={"Authorization": f"Bearer {redis_token}"},
+            )
+            r.raise_for_status()
+            result = r.json()
+
+        raw_val = result.get("result")
+        if not raw_val:
+            raise HTTPException(404, "File not found or expired (link valid for 1 hour)")
+
+        meta = json.loads(raw_val)
+        filename = meta["filename"]
+        mime     = meta.get("mime", "application/octet-stream")
+        data     = _base64.b64decode(meta["data"])
+
+        return _Response(
+            content=data,
+            media_type=mime,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(data)),
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Download error: {e}")

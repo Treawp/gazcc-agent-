@@ -138,113 +138,320 @@ class DeleteFileTool(BaseTool):
 
 class FetchURLTool(BaseTool):
     name = "fetch_url"
-    description = "Fetch content from a URL. Returns cleaned text (HTML stripped)."
-    parameters = "url: str, max_chars: int = 6000"
+    description = (
+        "Fetch content from a URL. Returns cleaned text (HTML stripped). "
+        "Auto-retry with backoff, rotates User-Agent, handles redirects, "
+        "separate connect/read timeouts to prevent hanging."
+    )
+    parameters = "url: str, max_chars: int = 6000, retries: int = 3, timeout: int = 12"
 
-    async def run(self, url: str, max_chars: int = 6000) -> ToolResult:
+    # Rotate UA biar gak keblok
+    _USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    ]
+
+    async def run(self, url: str, max_chars: int = 6000, retries: int = 3, timeout: int = 12) -> ToolResult:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
-        try:
+
+        last_err = ""
+        for attempt in range(max(1, retries)):
+            ua = self._USER_AGENTS[attempt % len(self._USER_AGENTS)]
             headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; GazccAgent/1.0)"
-                ),
+                "User-Agent": ua,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "DNT": "1",
             }
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
+            try:
+                # Pisah connect timeout vs read timeout — kunci anti-hang
+                timeout_cfg = httpx.Timeout(connect=6.0, read=timeout, write=5.0, pool=4.0)
+                async with httpx.AsyncClient(
+                    timeout=timeout_cfg,
+                    follow_redirects=True,
+                    headers=headers,
+                    http2=True,
+                ) as client:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+
                 ct = resp.headers.get("content-type", "")
+
+                # JSON — return raw
                 if "json" in ct:
-                    return ToolResult(True, resp.text[:max_chars], {"url": url, "content_type": ct})
+                    return ToolResult(True, resp.text[:max_chars], {"url": url, "content_type": ct, "attempt": attempt + 1})
+
+                # HTML — strip noise
                 soup = BeautifulSoup(resp.text, "lxml")
-                # remove noise
-                for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
+                for tag in soup(["script", "style", "nav", "footer", "header",
+                                  "aside", "form", "noscript", "iframe", "svg"]):
                     tag.decompose()
-                text = " ".join(soup.get_text(separator=" ").split())
-                return ToolResult(True, text[:max_chars], {"url": url, "chars": len(text)})
-        except httpx.HTTPStatusError as e:
-            return ToolResult(False, f"HTTP {e.response.status_code}: {url}")
-        except Exception as e:
-            return ToolResult(False, f"fetch_url error: {e}")
+
+                # Prioritas: article > main > body
+                main = soup.find("article") or soup.find("main") or soup.find("body")
+                raw_text = main.get_text(separator=" ") if main else soup.get_text(separator=" ")
+                text = " ".join(raw_text.split())
+
+                return ToolResult(True, text[:max_chars], {
+                    "url": url,
+                    "chars": len(text),
+                    "attempt": attempt + 1,
+                    "status": resp.status_code,
+                })
+
+            except httpx.HTTPStatusError as e:
+                last_err = f"HTTP {e.response.status_code}"
+                if e.response.status_code in (403, 404, 410, 451):
+                    break  # Gak perlu retry kalau memang diblok/gak ada
+                await asyncio.sleep(1.5 * (attempt + 1))
+
+            except (httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                last_err = f"Timeout (attempt {attempt + 1}): {type(e).__name__}"
+                await asyncio.sleep(1.0 * (attempt + 1))
+
+            except httpx.ConnectError as e:
+                last_err = f"ConnectError: {e}"
+                await asyncio.sleep(1.0 * (attempt + 1))
+
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                await asyncio.sleep(0.5)
+
+        return ToolResult(False, f"fetch_url gagal setelah {retries} attempt. Error terakhir: {last_err}", {"url": url})
 
 
 class WebSearchTool(BaseTool):
     name = "web_search"
-    description = "Search the web using DuckDuckGo. Returns top results with titles and snippets."
-    parameters = "query: str, max_results: int = 5"
+    description = (
+        "Search the web. Auto-cascade melalui 4 engine: "
+        "DDG API → DDG HTML → Brave → SearXNG. "
+        "Retry otomatis per engine, concurrent fallback kalau semua lambat."
+    )
+    parameters = "query: str, max_results: int = 5, engine: str = 'auto'"
 
-    async def run(self, query: str, max_results: int = 5) -> ToolResult:
+    # ── User-Agent pool ────────────────────────────────────────────────────────
+    _UA = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 Version/17.4 Safari/605.1.15",
+    ]
+
+    # SearXNG public instances — fallback terakhir
+    _SEARXNG_INSTANCES = [
+        "https://searx.be",
+        "https://search.inetol.net",
+        "https://searxng.site",
+        "https://searx.tiekoetter.com",
+    ]
+
+    def _headers(self, idx: int = 0) -> dict:
+        return {
+            "User-Agent": self._UA[idx % len(self._UA)],
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "DNT": "1",
+        }
+
+    def _timeout(self, connect: float = 6.0, read: float = 12.0) -> httpx.Timeout:
+        return httpx.Timeout(connect=connect, read=read, write=5.0, pool=4.0)
+
+    # ── Engine 1: DDG Instant Answer API ──────────────────────────────────────
+    async def _ddg_api(self, query: str, max_results: int) -> list[dict] | None:
         try:
-            # DuckDuckGo Instant Answer API
-            url = "https://api.duckduckgo.com/"
-            params = {
-                "q": query,
-                "format": "json",
-                "no_html": "1",
-                "skip_disambig": "1",
-            }
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(url, params=params)
+            params = {"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"}
+            async with httpx.AsyncClient(timeout=self._timeout(5, 8), headers=self._headers(0)) as c:
+                resp = await c.get("https://api.duckduckgo.com/", params=params)
                 data = resp.json()
 
-            parts: list[str] = []
-
+            results = []
             if data.get("Answer"):
-                parts.append(f"📌 Instant Answer: {data['Answer']}")
-
+                results.append({"title": "Instant Answer", "snippet": data["Answer"], "url": ""})
             if data.get("AbstractText"):
-                parts.append(f"📖 Summary: {data['AbstractText']}")
-                if data.get("AbstractURL"):
-                    parts.append(f"   Source: {data['AbstractURL']}")
+                results.append({"title": data.get("Heading", "Summary"), "snippet": data["AbstractText"], "url": data.get("AbstractURL", "")})
 
-            topics = data.get("RelatedTopics", [])
-            count = 0
-            for t in topics:
-                if count >= max_results:
+            for t in data.get("RelatedTopics", []):
+                if len(results) >= max_results:
                     break
                 if isinstance(t, dict) and t.get("Text"):
-                    txt = t["Text"]
-                    link = t.get("FirstURL", "")
-                    parts.append(f"• {txt}" + (f"\n  → {link}" if link else ""))
-                    count += 1
+                    results.append({"title": t.get("Text", "")[:80], "snippet": t["Text"], "url": t.get("FirstURL", "")})
                 elif isinstance(t, dict) and t.get("Topics"):
                     for sub in t["Topics"]:
-                        if count >= max_results:
+                        if len(results) >= max_results:
                             break
                         if sub.get("Text"):
-                            parts.append(f"• {sub['Text']}" + (f"\n  → {sub.get('FirstURL','')}" if sub.get("FirstURL") else ""))
-                            count += 1
+                            results.append({"title": sub["Text"][:80], "snippet": sub["Text"], "url": sub.get("FirstURL", "")})
 
-            if not parts:
-                # fallback: try HTML scrape of DDG
-                return await self._html_fallback(query, max_results)
+            return results if results else None
+        except Exception:
+            return None
 
-            return ToolResult(True, "\n\n".join(parts), {"query": query})
-        except Exception as e:
-            return ToolResult(False, f"web_search error: {e}")
-
-    async def _html_fallback(self, query: str, max_results: int) -> ToolResult:
+    # ── Engine 2: DDG HTML scrape ─────────────────────────────────────────────
+    async def _ddg_html(self, query: str, max_results: int) -> list[dict] | None:
         try:
-            url = f"https://html.duckduckgo.com/html/?q={query.replace(' ', '+')}"
-            headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"}
-            async with httpx.AsyncClient(timeout=15, headers=headers) as client:
-                resp = await client.get(url)
+            q = query.replace(" ", "+")
+            url = f"https://html.duckduckgo.com/html/?q={q}"
+            async with httpx.AsyncClient(timeout=self._timeout(6, 12), headers=self._headers(1), follow_redirects=True) as c:
+                resp = await c.get(url)
+
             soup = BeautifulSoup(resp.text, "lxml")
             results = []
-            for r in soup.select(".result")[:max_results]:
+            for r in soup.select(".result")[:max_results + 2]:
                 title_el = r.select_one(".result__title")
-                snip_el = r.select_one(".result__snippet")
-                url_el = r.select_one(".result__url")
-                title = title_el.get_text(strip=True) if title_el else ""
-                snip = snip_el.get_text(strip=True) if snip_el else ""
-                link = url_el.get_text(strip=True) if url_el else ""
+                snip_el  = r.select_one(".result__snippet")
+                url_el   = r.select_one(".result__url")
+                href_el  = r.select_one("a.result__a")
+                title  = title_el.get_text(strip=True) if title_el else ""
+                snip   = snip_el.get_text(strip=True) if snip_el else ""
+                link   = ""
+                if href_el and href_el.get("href"):
+                    raw = href_el["href"]
+                    # DDG wraps link di redirect — extract uddg param
+                    if "uddg=" in raw:
+                        import urllib.parse
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(raw).query)
+                        link = qs.get("uddg", [""])[0]
+                    else:
+                        link = raw
+                elif url_el:
+                    link = url_el.get_text(strip=True)
                 if title:
-                    results.append(f"• {title}\n  {snip}\n  → {link}")
-            if not results:
-                return ToolResult(False, f"No results found for: {query}")
-            return ToolResult(True, "\n\n".join(results), {"query": query})
-        except Exception as e:
-            return ToolResult(False, f"search fallback error: {e}")
+                    results.append({"title": title, "snippet": snip, "url": link})
+                if len(results) >= max_results:
+                    break
+
+            return results if results else None
+        except Exception:
+            return None
+
+    # ── Engine 3: Brave Search scrape ─────────────────────────────────────────
+    async def _brave_html(self, query: str, max_results: int) -> list[dict] | None:
+        try:
+            import urllib.parse
+            q = urllib.parse.quote_plus(query)
+            url = f"https://search.brave.com/search?q={q}&source=web"
+            headers = self._headers(2)
+            headers["Sec-Fetch-Site"] = "none"
+            headers["Sec-Fetch-Mode"] = "navigate"
+
+            async with httpx.AsyncClient(timeout=self._timeout(6, 14), headers=headers, follow_redirects=True) as c:
+                resp = await c.get(url)
+
+            soup = BeautifulSoup(resp.text, "lxml")
+            results = []
+
+            # Brave result cards
+            for card in soup.select(".snippet, [data-type='web']")[:max_results + 3]:
+                title_el = card.select_one(".title, h3, .snippet-title")
+                snip_el  = card.select_one(".snippet-description, p, .description")
+                url_el   = card.select_one("cite, .netloc, .url")
+                href_el  = card.select_one("a[href]")
+
+                title = title_el.get_text(strip=True) if title_el else ""
+                snip  = snip_el.get_text(strip=True) if snip_el else ""
+                link  = href_el["href"] if href_el and href_el.get("href") else (url_el.get_text(strip=True) if url_el else "")
+
+                if title and len(title) > 3:
+                    results.append({"title": title, "snippet": snip, "url": link})
+                if len(results) >= max_results:
+                    break
+
+            return results if results else None
+        except Exception:
+            return None
+
+    # ── Engine 4: SearXNG public instances ────────────────────────────────────
+    async def _searxng(self, query: str, max_results: int) -> list[dict] | None:
+        import urllib.parse
+        q = urllib.parse.quote_plus(query)
+
+        for instance in self._SEARXNG_INSTANCES:
+            try:
+                url = f"{instance}/search?q={q}&format=json&language=en"
+                async with httpx.AsyncClient(timeout=self._timeout(5, 10), headers=self._headers(0)) as c:
+                    resp = await c.get(url)
+                    data = resp.json()
+
+                results_raw = data.get("results", [])
+                if not results_raw:
+                    continue
+
+                results = []
+                for r in results_raw[:max_results]:
+                    results.append({
+                        "title":   r.get("title", ""),
+                        "snippet": r.get("content", ""),
+                        "url":     r.get("url", ""),
+                    })
+                if results:
+                    return results
+            except Exception:
+                continue
+
+        return None
+
+    # ── Format output ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _format(results: list[dict], engine: str, query: str) -> ToolResult:
+        lines = [f"🔍 Query: \"{query}\" — via {engine}\n"]
+        for i, r in enumerate(results, 1):
+            title   = r.get("title", "").strip()
+            snippet = r.get("snippet", "").strip()
+            url     = r.get("url", "").strip()
+            lines.append(f"{i}. {title}")
+            if snippet:
+                lines.append(f"   {snippet[:200]}")
+            if url:
+                lines.append(f"   → {url}")
+        return ToolResult(True, "\n".join(lines), {"engine": engine, "query": query, "count": len(results)})
+
+    # ── Main run — cascade fallback ───────────────────────────────────────────
+    async def run(self, query: str, max_results: int = 5, engine: str = "auto") -> ToolResult:
+        engine = engine.lower().strip()
+
+        # Manual engine select
+        if engine == "ddg_api":
+            r = await self._ddg_api(query, max_results)
+            return self._format(r, "DDG API", query) if r else ToolResult(False, "DDG API returned no results.")
+        if engine == "ddg_html":
+            r = await self._ddg_html(query, max_results)
+            return self._format(r, "DDG HTML", query) if r else ToolResult(False, "DDG HTML scrape failed.")
+        if engine == "brave":
+            r = await self._brave_html(query, max_results)
+            return self._format(r, "Brave", query) if r else ToolResult(False, "Brave search failed.")
+        if engine == "searxng":
+            r = await self._searxng(query, max_results)
+            return self._format(r, "SearXNG", query) if r else ToolResult(False, "All SearXNG instances failed.")
+
+        # AUTO — cascade semua engine, pakai yang pertama berhasil
+        engines = [
+            ("DDG API",  self._ddg_api),
+            ("DDG HTML", self._ddg_html),
+            ("Brave",    self._brave_html),
+            ("SearXNG",  self._searxng),
+        ]
+
+        errors = []
+        for eng_name, eng_fn in engines:
+            try:
+                result = await eng_fn(query, max_results)
+                if result:
+                    return self._format(result, eng_name, query)
+                errors.append(f"{eng_name}: no results")
+            except Exception as e:
+                errors.append(f"{eng_name}: {type(e).__name__}")
+                continue
+
+        return ToolResult(
+            False,
+            f"Semua search engine gagal untuk query '{query}'.\n" + "\n".join(errors),
+            {"query": query, "engines_tried": [e[0] for e in engines]},
+        )
 
 
 # ── code execution ────────────────────────────────────────────────────────────
@@ -1694,6 +1901,16 @@ class ToolRegistry:
         ]:
             self._register(tool)
 
+    def _init_mcp(self):
+        """Register MCP tools — called after all classes are defined (bottom of module)."""
+        for tool in [
+            McpServerConnectTool(), McpListToolsTool(), McpCallToolTool(),
+            McpListResourcesTool(), McpReadResourceTool(), McpListPromptsTool(),
+            McpGetPromptTool(), McpServerPingTool(), McpListServersTool(),
+            McpDisconnectTool(), McpBatchCallTool(),
+        ]:
+            self._register(tool)
+
     def _register(self, tool: BaseTool):
         self._tools[tool.name] = tool
 
@@ -1723,6 +1940,615 @@ class ToolRegistry:
         except Exception as e:
             return ToolResult(False, f"Tool {name} crashed: {e}")
 
-    def register(self, tool: "BaseTool"):
-        """Public method to register additional tools (e.g. strategic tools)."""
-        self._tools[tool.name] = tool
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── MCP (Model Context Protocol) TOOLS ───────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  MCP adalah open protocol dari Anthropic yang nyambungin AI agent ke
+#  external tools, data sources, dan services lewat standar JSON-RPC 2.0.
+#
+#  Tools ini implement MCP CLIENT — agent bisa:
+#    • Discover & list tools dari MCP server manapun
+#    • Call tools di remote MCP server
+#    • Baca resources (files, DB, APIs) lewat MCP
+#    • Ambil prompt templates dari MCP
+#    • Health check MCP servers
+#    • Manage multiple server connections
+#    • Batch call multiple tools sekaligus
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+# ── mcp_server_connect ────────────────────────────────────────────────────────
+
+class McpServerConnectTool(BaseTool):
+    name = "mcp_server_connect"
+    description = (
+        "Connect to an MCP (Model Context Protocol) server via HTTP/SSE. "
+        "Performs handshake, negotiates capabilities, and returns server info. "
+        "Must be called before using mcp_call_tool or mcp_list_tools on that server. "
+        "Stores connection metadata in session for reuse."
+    )
+    parameters = "server_url: str, server_name: str = None, api_key: str = None, timeout: int = 15"
+
+    # In-memory session store — shared across all MCP tool instances
+    _sessions: dict = {}
+
+    async def run(
+        self,
+        server_url: str,
+        server_name: str = None,
+        api_key: str = None,
+        timeout: int = 15,
+    ) -> ToolResult:
+        if not server_url.startswith(("http://", "https://")):
+            server_url = "https://" + server_url
+
+        name = server_name or server_url.split("//")[-1].split("/")[0]
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        # MCP initialize handshake (JSON-RPC 2.0)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "roots": {"listChanged": True},
+                    "sampling": {},
+                },
+                "clientInfo": {"name": "GazccAgent", "version": "2.0"},
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(server_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+
+            if "error" in data:
+                return ToolResult(False, f"MCP handshake error: {data['error']}")
+
+            result = data.get("result", {})
+            caps = result.get("capabilities", {})
+            server_info = result.get("serverInfo", {})
+
+            session = {
+                "url": server_url,
+                "name": name,
+                "api_key": api_key,
+                "headers": headers,
+                "protocol_version": result.get("protocolVersion", "unknown"),
+                "server_info": server_info,
+                "capabilities": caps,
+                "connected": True,
+            }
+            McpServerConnectTool._sessions[name] = session
+
+            summary = {
+                "server_name": name,
+                "url": server_url,
+                "protocol_version": session["protocol_version"],
+                "server_info": server_info,
+                "capabilities": list(caps.keys()),
+                "status": "connected",
+                "session_key": name,
+            }
+            return ToolResult(True, json.dumps(summary, indent=2), summary)
+
+        except httpx.HTTPStatusError as e:
+            return ToolResult(False, f"HTTP {e.response.status_code} connecting to {server_url}")
+        except Exception as e:
+            return ToolResult(False, f"mcp_server_connect error: {e}")
+
+
+# ── mcp_list_tools ────────────────────────────────────────────────────────────
+
+class McpListToolsTool(BaseTool):
+    name = "mcp_list_tools"
+    description = (
+        "List all tools available on a connected MCP server. "
+        "Returns tool names, descriptions, and input schemas. "
+        "Use after mcp_server_connect to discover what the server can do. "
+        "If server_name is omitted, lists tools from all connected servers."
+    )
+    parameters = "server_name: str = None, server_url: str = None"
+
+    async def run(self, server_name: str = None, server_url: str = None) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+
+        # Auto-connect if url given but not in sessions
+        if server_url and not server_name:
+            connector = McpServerConnectTool()
+            conn_result = await connector.run(server_url=server_url)
+            if not conn_result.success:
+                return conn_result
+            server_name = list(sessions.keys())[-1]
+
+        targets = (
+            {server_name: sessions[server_name]}
+            if server_name and server_name in sessions
+            else sessions
+        )
+
+        if not targets:
+            return ToolResult(False, "No MCP servers connected. Use mcp_server_connect first.")
+
+        all_tools = []
+        for sname, sess in targets.items():
+            payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                    data = resp.json()
+
+                tools = data.get("result", {}).get("tools", [])
+                for t in tools:
+                    all_tools.append({
+                        "server": sname,
+                        "name": t.get("name"),
+                        "description": t.get("description", ""),
+                        "input_schema": t.get("inputSchema", {}),
+                    })
+            except Exception as e:
+                all_tools.append({"server": sname, "error": str(e)})
+
+        if not all_tools:
+            return ToolResult(False, "No tools found on connected servers.")
+
+        lines = []
+        for t in all_tools:
+            if "error" in t:
+                lines.append(f"[{t['server']}] ERROR: {t['error']}")
+            else:
+                required = t["input_schema"].get("required", [])
+                lines.append(f"[{t['server']}] {t['name']}\n  → {t['description']}\n  required: {required}")
+
+        return ToolResult(True, "\n\n".join(lines), {"total_tools": len(all_tools)})
+
+
+# ── mcp_call_tool ─────────────────────────────────────────────────────────────
+
+class McpCallToolTool(BaseTool):
+    name = "mcp_call_tool"
+    description = (
+        "Call a specific tool on a connected MCP server and return its result. "
+        "Use mcp_list_tools to discover available tool names and their required parameters. "
+        "Returns the tool's output content directly."
+    )
+    parameters = "server_name: str, tool_name: str, arguments: dict = None, timeout: int = 30"
+
+    _call_id: int = 100
+
+    async def run(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: dict = None,
+        timeout: int = 30,
+    ) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected. Use mcp_server_connect first.")
+
+        sess = sessions[server_name]
+        McpCallToolTool._call_id += 1
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": McpCallToolTool._call_id,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments or {},
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                resp.raise_for_status()
+                data = resp.json()
+
+            if "error" in data:
+                err = data["error"]
+                return ToolResult(False, f"MCP tool error [{err.get('code')}]: {err.get('message')}")
+
+            result = data.get("result", {})
+            is_error = result.get("isError", False)
+            content = result.get("content", [])
+
+            # Extract text from content blocks
+            parts = []
+            for block in content:
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "image":
+                    parts.append(f"[IMAGE: {block.get('mimeType', 'unknown')}]")
+                elif block.get("type") == "resource":
+                    parts.append(f"[RESOURCE: {block.get('uri', '')}]")
+
+            output = "\n".join(parts) if parts else json.dumps(result, indent=2)
+            return ToolResult(not is_error, output, {
+                "server": server_name,
+                "tool": tool_name,
+                "is_error": is_error,
+                "content_blocks": len(content),
+            })
+
+        except httpx.HTTPStatusError as e:
+            return ToolResult(False, f"HTTP {e.response.status_code}: {e.response.text[:300]}")
+        except Exception as e:
+            return ToolResult(False, f"mcp_call_tool error: {e}")
+
+
+# ── mcp_list_resources ────────────────────────────────────────────────────────
+
+class McpListResourcesTool(BaseTool):
+    name = "mcp_list_resources"
+    description = (
+        "List all resources exposed by a connected MCP server. "
+        "Resources are data sources like files, database records, API endpoints "
+        "that the server makes available for reading. "
+        "Returns URI, name, description, and MIME type of each resource."
+    )
+    parameters = "server_name: str"
+
+    async def run(self, server_name: str) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected.")
+
+        sess = sessions[server_name]
+        payload = {"jsonrpc": "2.0", "id": 10, "method": "resources/list", "params": {}}
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                data = resp.json()
+
+            if "error" in data:
+                return ToolResult(False, f"MCP error: {data['error']}")
+
+            resources = data.get("result", {}).get("resources", [])
+            if not resources:
+                return ToolResult(True, "No resources available on this server.", {"count": 0})
+
+            lines = []
+            for r in resources:
+                lines.append(
+                    f"URI:  {r.get('uri', '')}\n"
+                    f"Name: {r.get('name', '')}\n"
+                    f"Desc: {r.get('description', '')}\n"
+                    f"MIME: {r.get('mimeType', 'unknown')}"
+                )
+
+            return ToolResult(True, "\n\n".join(lines), {"count": len(resources)})
+        except Exception as e:
+            return ToolResult(False, f"mcp_list_resources error: {e}")
+
+
+# ── mcp_read_resource ─────────────────────────────────────────────────────────
+
+class McpReadResourceTool(BaseTool):
+    name = "mcp_read_resource"
+    description = (
+        "Read the content of a specific resource from a connected MCP server. "
+        "Use mcp_list_resources to get available URIs first. "
+        "Returns the raw resource content (text, JSON, or binary info)."
+    )
+    parameters = "server_name: str, uri: str"
+
+    async def run(self, server_name: str, uri: str) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected.")
+
+        sess = sessions[server_name]
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "resources/read",
+            "params": {"uri": uri},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                data = resp.json()
+
+            if "error" in data:
+                return ToolResult(False, f"MCP error: {data['error']}")
+
+            contents = data.get("result", {}).get("contents", [])
+            parts = []
+            for c in contents:
+                if "text" in c:
+                    parts.append(c["text"])
+                elif "blob" in c:
+                    parts.append(f"[BINARY BLOB: {len(c['blob'])} chars base64, MIME: {c.get('mimeType','?')}]")
+
+            return ToolResult(True, "\n".join(parts) if parts else "(empty)", {
+                "uri": uri, "server": server_name, "blocks": len(contents)
+            })
+        except Exception as e:
+            return ToolResult(False, f"mcp_read_resource error: {e}")
+
+
+# ── mcp_list_prompts ──────────────────────────────────────────────────────────
+
+class McpListPromptsTool(BaseTool):
+    name = "mcp_list_prompts"
+    description = (
+        "List prompt templates available on an MCP server. "
+        "MCP servers can expose reusable prompt templates with dynamic arguments. "
+        "Returns prompt names, descriptions, and required arguments."
+    )
+    parameters = "server_name: str"
+
+    async def run(self, server_name: str) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected.")
+
+        sess = sessions[server_name]
+        payload = {"jsonrpc": "2.0", "id": 30, "method": "prompts/list", "params": {}}
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                data = resp.json()
+
+            if "error" in data:
+                return ToolResult(False, f"MCP error: {data['error']}")
+
+            prompts = data.get("result", {}).get("prompts", [])
+            if not prompts:
+                return ToolResult(True, "No prompts available on this server.", {"count": 0})
+
+            lines = []
+            for p in prompts:
+                args = p.get("arguments", [])
+                arg_str = ", ".join(
+                    f"{a['name']}{'*' if a.get('required') else ''}" for a in args
+                ) or "none"
+                lines.append(
+                    f"Name: {p.get('name')}\n"
+                    f"Desc: {p.get('description', '')}\n"
+                    f"Args: {arg_str}"
+                )
+
+            return ToolResult(True, "\n\n".join(lines), {"count": len(prompts)})
+        except Exception as e:
+            return ToolResult(False, f"mcp_list_prompts error: {e}")
+
+
+# ── mcp_get_prompt ────────────────────────────────────────────────────────────
+
+class McpGetPromptTool(BaseTool):
+    name = "mcp_get_prompt"
+    description = (
+        "Fetch and render a specific prompt template from an MCP server. "
+        "Pass required arguments to fill in the template. "
+        "Returns the rendered prompt messages ready to inject into an LLM call."
+    )
+    parameters = "server_name: str, prompt_name: str, arguments: dict = None"
+
+    async def run(self, server_name: str, prompt_name: str, arguments: dict = None) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected.")
+
+        sess = sessions[server_name]
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "prompts/get",
+            "params": {"name": prompt_name, "arguments": arguments or {}},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(sess["url"], json=payload, headers=sess["headers"])
+                data = resp.json()
+
+            if "error" in data:
+                return ToolResult(False, f"MCP error: {data['error']}")
+
+            result = data.get("result", {})
+            messages = result.get("messages", [])
+            description = result.get("description", "")
+
+            parts = []
+            if description:
+                parts.append(f"Description: {description}\n")
+            for msg in messages:
+                role = msg.get("role", "?")
+                content = msg.get("content", {})
+                text = content.get("text", "") if isinstance(content, dict) else str(content)
+                parts.append(f"[{role.upper()}]\n{text}")
+
+            return ToolResult(True, "\n\n".join(parts), {
+                "prompt": prompt_name, "messages": len(messages)
+            })
+        except Exception as e:
+            return ToolResult(False, f"mcp_get_prompt error: {e}")
+
+
+# ── mcp_server_ping ───────────────────────────────────────────────────────────
+
+class McpServerPingTool(BaseTool):
+    name = "mcp_server_ping"
+    description = (
+        "Check health/connectivity of an MCP server. "
+        "Returns latency, server status, and whether the server is reachable. "
+        "Use to validate a server before calling tools, or monitor uptime."
+    )
+    parameters = "server_url: str = None, server_name: str = None"
+
+    async def run(self, server_url: str = None, server_name: str = None) -> ToolResult:
+        import time
+
+        sessions = McpServerConnectTool._sessions
+
+        # Resolve URL from session if name given
+        if server_name and server_name in sessions:
+            server_url = sessions[server_name]["url"]
+        elif not server_url:
+            if not sessions:
+                return ToolResult(False, "No server_url or server_name provided.")
+            # Ping all connected
+            results = []
+            for sname, sess in sessions.items():
+                t0 = time.monotonic()
+                try:
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        r = await client.get(sess["url"])
+                    ms = round((time.monotonic() - t0) * 1000, 1)
+                    results.append(f"✓ {sname} — {ms}ms (HTTP {r.status_code})")
+                except Exception as e:
+                    results.append(f"✗ {sname} — unreachable: {e}")
+            return ToolResult(True, "\n".join(results))
+
+        if not server_url.startswith(("http://", "https://")):
+            server_url = "https://" + server_url
+
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(server_url)
+            ms = round((time.monotonic() - t0) * 1000, 1)
+            return ToolResult(True, f"✓ Reachable — {ms}ms (HTTP {resp.status_code})", {
+                "url": server_url, "latency_ms": ms, "status_code": resp.status_code
+            })
+        except Exception as e:
+            ms = round((time.monotonic() - t0) * 1000, 1)
+            return ToolResult(False, f"✗ Unreachable after {ms}ms: {e}", {
+                "url": server_url, "latency_ms": ms
+            })
+
+
+# ── mcp_list_servers ──────────────────────────────────────────────────────────
+
+class McpListServersTool(BaseTool):
+    name = "mcp_list_servers"
+    description = (
+        "List all currently connected MCP servers in this session. "
+        "Shows server name, URL, protocol version, and capabilities. "
+        "Use to check which servers are available before calling tools."
+    )
+    parameters = "(none)"
+
+    async def run(self) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if not sessions:
+            return ToolResult(True, "No MCP servers connected. Use mcp_server_connect to add one.")
+
+        lines = []
+        for name, sess in sessions.items():
+            caps = list(sess.get("capabilities", {}).keys())
+            lines.append(
+                f"Name:     {name}\n"
+                f"URL:      {sess['url']}\n"
+                f"Protocol: {sess.get('protocol_version', '?')}\n"
+                f"Caps:     {caps}\n"
+                f"Status:   {'✓ connected' if sess.get('connected') else '✗ disconnected'}"
+            )
+
+        return ToolResult(True, "\n\n".join(lines), {"count": len(sessions)})
+
+
+# ── mcp_disconnect ────────────────────────────────────────────────────────────
+
+class McpDisconnectTool(BaseTool):
+    name = "mcp_disconnect"
+    description = (
+        "Disconnect from an MCP server and remove it from the session. "
+        "Pass server_name to disconnect one, or 'all' to clear all connections."
+    )
+    parameters = "server_name: str"
+
+    async def run(self, server_name: str) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name.lower() == "all":
+            count = len(sessions)
+            sessions.clear()
+            return ToolResult(True, f"Disconnected all {count} MCP server(s).")
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not found in session.")
+        del sessions[server_name]
+        return ToolResult(True, f"Disconnected from '{server_name}'.")
+
+
+# ── mcp_batch_call ────────────────────────────────────────────────────────────
+
+class McpBatchCallTool(BaseTool):
+    name = "mcp_batch_call"
+    description = (
+        "Call multiple tools on an MCP server in parallel (concurrent requests). "
+        "Pass a list of {tool_name, arguments} dicts. "
+        "All calls fire simultaneously — much faster than sequential mcp_call_tool. "
+        "Returns results indexed by tool name."
+    )
+    parameters = "server_name: str, calls: list, timeout: int = 30"
+
+    async def run(self, server_name: str, calls: list, timeout: int = 30) -> ToolResult:
+        sessions = McpServerConnectTool._sessions
+        if server_name not in sessions:
+            return ToolResult(False, f"Server '{server_name}' not connected.")
+        if not calls:
+            return ToolResult(False, "calls list is empty.")
+
+        caller = McpCallToolTool()
+
+        async def _call_one(i, c):
+            tool_name = c.get("tool_name") or c.get("name", "")
+            args = c.get("arguments") or c.get("args") or {}
+            result = await caller.run(server_name=server_name, tool_name=tool_name,
+                                      arguments=args, timeout=timeout)
+            return tool_name, i, result
+
+        tasks = [_call_one(i, c) for i, c in enumerate(calls)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        output = {}
+        errors = 0
+        for item in results:
+            if isinstance(item, Exception):
+                errors += 1
+                output[f"error_{errors}"] = str(item)
+            else:
+                tool_name, idx, res = item
+                key = f"{tool_name}_{idx}" if tool_name in output else tool_name
+                output[key] = {"success": res.success, "output": res.output[:2000]}
+                if not res.success:
+                    errors += 1
+
+        return ToolResult(
+            errors == 0,
+            json.dumps(output, indent=2),
+            {"total": len(calls), "errors": errors, "server": server_name},
+        )
+
+
+
+
+# ── Late-bind MCP tools into ToolRegistry ─────────────────────────────────────
+# MCP classes defined after ToolRegistry — register them here after module load.
+
+def _bootstrap_mcp(registry_cls):
+    """Monkey-patch ToolRegistry to auto-register MCP tools on instantiation."""
+    original_init = registry_cls.__init__
+
+    def new_init(self, cfg):
+        original_init(self, cfg)
+        self._init_mcp()
+
+    registry_cls.__init__ = new_init
+
+_bootstrap_mcp(ToolRegistry)

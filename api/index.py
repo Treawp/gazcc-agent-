@@ -478,3 +478,51 @@ document.getElementById('taskInput').addEventListener('keydown',e=>{if(e.key==='
 </script>
 </body>
 </html>"""
+
+
+# ── /api/proxy — OpenRouter chat proxy (dipanggil frontend) ───────────────────
+
+import httpx as _httpx
+
+@app.get("/api/proxy")
+async def proxy_chat(
+    question: str = Query(..., description="User message / full prompt"),
+    system: str = Query("You are a helpful AI assistant.", description="System prompt"),
+    key: str = Query("", description="OpenRouter API key"),
+    model: str = Query("", description="Model ID"),
+):
+    cfg_llm = CFG.get("llm", {})
+    api_key = key or cfg_llm.get("api_key", "") or os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
+
+    selected_model = model or cfg_llm.get("model", "google/gemma-4-26b-a4b-it")
+    base_url = cfg_llm.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://gazccai.vercel.app",
+        "X-Title": "GazccAI",
+    }
+    payload = {
+        "model": selected_model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ],
+        "max_tokens": 4000,
+        "temperature": 0.7,
+    }
+
+    try:
+        async with _httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            result = data["choices"][0]["message"]["content"]
+            return JSONResponse({"status": True, "data": {"result": result}})
+    except _httpx.HTTPStatusError as e:
+        return JSONResponse({"status": False, "message": f"OpenRouter HTTP {e.response.status_code}: {e.response.text[:200]}"})
+    except Exception as e:
+        return JSONResponse({"status": False, "message": str(e)})

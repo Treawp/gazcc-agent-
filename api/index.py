@@ -496,7 +496,7 @@ async def proxy_chat(
     if not api_key:
         raise HTTPException(500, "OPENROUTER_API_KEY not configured")
 
-    selected_model = model or cfg_llm.get("model", "google/gemma-4-26b-a4b-it")
+    selected_model = model or cfg_llm.get("model", "moonshotai/kimi-k2.5")
     base_url = cfg_llm.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
 
     headers = {

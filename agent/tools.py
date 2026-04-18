@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import uuid
+
 import aiofiles
 import httpx
 from bs4 import BeautifulSoup
@@ -337,6 +339,175 @@ class SummarizeTextTool(BaseTool):
         return ToolResult(True, truncated)
 
 
+
+
+# ── file export tools ─────────────────────────────────────────────────────────
+# Jembatan antara sandbox Agent dan User Interface.
+# Agent bisa "kirim" file ke user lewat Base64 atau Download Link.
+
+import base64 as _base64
+import mimetypes as _mimetypes
+
+
+class ExportFileBase64Tool(BaseTool):
+    """
+    Option 1 — The Base64 Bridge.
+    Baca file dari sandbox, encode ke Base64, kembalikan sebagai JSON.
+    Frontend akan render tombol download otomatis dari data ini.
+
+    Agent harus panggil tool ini dan tulis output-nya di Final Answer
+    dengan format:  [FILE_EXPORT:filename:base64data:mimetype]
+    Frontend mendeteksi marker ini dan membuat tombol download.
+    """
+    name = "export_file_base64"
+    description = (
+        "Export a file from the sandbox so the user can download it. "
+        "Reads the file, encodes it as Base64, and returns a download marker "
+        "that the UI renders as a clickable download button. "
+        "Use this after creating any file the user should receive."
+    )
+    parameters = "path: str"
+
+    async def run(self, path: str) -> ToolResult:
+        try:
+            p = Path(path)
+            if not p.exists():
+                return ToolResult(False, f"File not found: {path}")
+
+            size = p.stat().st_size
+            if size > 10 * 1024 * 1024:  # 10 MB limit
+                return ToolResult(False, f"File too large to export via Base64 (>{size // 1024 // 1024}MB). Use export_file_link instead.")
+
+            # Detect MIME type
+            mime, _ = _mimetypes.guess_type(str(p))
+            if not mime:
+                mime = "application/octet-stream"
+
+            # Read and encode
+            with open(p, "rb") as f:
+                raw = f.read()
+            b64 = _base64.b64encode(raw).decode("utf-8")
+
+            filename = p.name
+            # Format: marker yang dikenali frontend untuk render tombol download
+            marker = f"[FILE_EXPORT:{filename}:{b64}:{mime}]"
+
+            return ToolResult(
+                True,
+                marker,
+                {
+                    "filename": filename,
+                    "size_bytes": size,
+                    "mime_type": mime,
+                    "encoding": "base64",
+                    "instruction": (
+                        f"File '{filename}' siap didownload. "
+                        f"Sertakan marker ini persis di Final Answer kamu: {marker}"
+                    ),
+                },
+            )
+        except Exception as e:
+            return ToolResult(False, f"export_file_base64 error: {e}")
+
+
+class ExportFileLinkTool(BaseTool):
+    """
+    Option 2 — The Download Link Bridge.
+    Copy file ke /tmp/gazcc_exports/, simpan ke Redis (jika tersedia),
+    dan kembalikan URL download yang bisa diklik user.
+
+    Jika Redis tidak tersedia, otomatis fallback ke Base64 bridge.
+    URL format: /api/download/{token}
+    """
+    name = "export_file_link"
+    description = (
+        "Generate a download link for a file so the user can download it directly. "
+        "Returns a URL the user can click. Falls back to Base64 if storage unavailable. "
+        "Prefer this over export_file_base64 for large files or better UX."
+    )
+    parameters = "path: str"
+
+    EXPORT_DIR = Path("/tmp/gazcc_exports")
+
+    async def run(self, path: str) -> ToolResult:
+        try:
+            p = Path(path)
+            if not p.exists():
+                return ToolResult(False, f"File not found: {path}")
+
+            size = p.stat().st_size
+            mime, _ = _mimetypes.guess_type(str(p))
+            if not mime:
+                mime = "application/octet-stream"
+
+            filename = p.name
+            token = str(uuid.uuid4())[:12]  # short unique token
+
+            # ── Coba simpan ke Redis ──────────────────────────────────────────
+            redis_url   = os.environ.get("UPSTASH_REDIS_REST_URL", "")
+            redis_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+
+            if redis_url and redis_token:
+                with open(p, "rb") as f:
+                    raw = f.read()
+                b64 = _base64.b64encode(raw).decode("utf-8")
+
+                # Simpan ke Redis dengan TTL 1 jam
+                redis_key = f"gazcc_export:{token}"
+                payload = json.dumps({"filename": filename, "mime": mime, "data": b64})
+
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.post(
+                        f"{redis_url}/set/{redis_key}",
+                        headers={"Authorization": f"Bearer {redis_token}"},
+                        json=[payload, "EX", 3600],
+                    )
+                    r.raise_for_status()
+
+                # Ambil base URL dari env atau gunakan relative path
+                base_url = os.environ.get("VERCEL_URL", "")
+                if base_url and not base_url.startswith("http"):
+                    base_url = f"https://{base_url}"
+                download_url = f"{base_url}/api/download/{token}" if base_url else f"/api/download/{token}"
+
+                marker = f"[FILE_LINK:{filename}:{download_url}]"
+                return ToolResult(
+                    True,
+                    marker,
+                    {
+                        "filename": filename,
+                        "download_url": download_url,
+                        "token": token,
+                        "expires_in": "1 hour",
+                        "size_bytes": size,
+                        "instruction": (
+                            f"File '{filename}' siap didownload via link. "
+                            f"Sertakan marker ini di Final Answer: {marker}"
+                        ),
+                    },
+                )
+
+            # ── Fallback ke Base64 jika Redis tidak ada ───────────────────────
+            with open(p, "rb") as f:
+                raw = f.read()
+            b64 = _base64.b64encode(raw).decode("utf-8")
+            marker = f"[FILE_EXPORT:{filename}:{b64}:{mime}]"
+            return ToolResult(
+                True,
+                marker,
+                {
+                    "filename": filename,
+                    "fallback": "base64 (Redis not configured)",
+                    "instruction": (
+                        f"Redis tidak tersedia, fallback ke Base64. "
+                        f"Sertakan marker ini di Final Answer: {marker}"
+                    ),
+                },
+            )
+
+        except Exception as e:
+            return ToolResult(False, f"export_file_link error: {e}")
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 class ToolRegistry:
@@ -349,7 +520,8 @@ class ToolRegistry:
             self._register(tool)
 
         if enabled.get("file_ops", True):
-            for tool in [ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool()]:
+            for tool in [ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool(),
+                         ExportFileBase64Tool(), ExportFileLinkTool()]:
                 self._register(tool)
 
         if enabled.get("fetch_url", True):

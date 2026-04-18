@@ -156,7 +156,7 @@ async def main():
 
     api_key = cfg.get("llm", {}).get("api_key", "")
     if not api_key:
-        print(c("✗ COVENANT_API_KEY not set. Export it or put in .env", RED))
+        print(c("✗ OPENROUTER_API_KEY not set. Export it or put in .env", RED))
         sys.exit(1)
 
     print()

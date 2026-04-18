@@ -14,7 +14,7 @@
     { "src": "/(.*)", "dest": "api/index.py" }
   ],
   "env": {
-    "COVENANT_API_KEY": "@covenant_api_key",
+    "OPENROUTER_API_KEY": "@openrouter_api_key",
     "UPSTASH_REDIS_REST_URL": "@upstash_redis_rest_url",
     "UPSTASH_REDIS_REST_TOKEN": "@upstash_redis_rest_token",
     "ALLOW_CODE_EXEC": "false"

@@ -1,0 +1,106 @@
+[
+  {
+    "name": "list_files_recursive",
+    "description": "Returns a full recursive directory or ZIP tree. Use this as the first step in any code exploration task — call it on a repo root or ZIP to get the complete file inventory before reading anything. Returns both a nested tree structure and a flat list of all paths.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Absolute or relative path to a local directory OR a .zip file. If a .zip path is given, the tree is built from ZIP contents without extraction."
+        }
+      },
+      "required": ["directory"]
+    }
+  },
+  {
+    "name": "read_file",
+    "description": "Reads a file and returns its content as a string. Auto-detects UTF-8, latin-1, or falls back to base64 for binary files. Supports reading directly from inside a ZIP archive without full extraction — supply zip_source to read a specific internal entry. Use this to inspect source code, configs, Lua scripts, JSON data, or any text-based asset.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "filepath": {
+          "type": "string",
+          "description": "Path to the file on disk, OR internal path within a ZIP when zip_source is provided."
+        },
+        "zip_source": {
+          "type": "string",
+          "description": "Optional. Path to a ZIP archive. When set, filepath is interpreted as the internal ZIP entry path."
+        }
+      },
+      "required": ["filepath"]
+    }
+  },
+  {
+    "name": "write_file",
+    "description": "Writes or overwrites a file with the given string content. Creates all missing parent directories automatically. Use this to persist generated code, patched files, analysis reports, or any agent output to disk.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "filepath": {
+          "type": "string",
+          "description": "Destination file path. If parent directories do not exist, they are created automatically."
+        },
+        "content": {
+          "type": "string",
+          "description": "Full string content to write. Overwrites existing content entirely."
+        },
+        "create_dirs": {
+          "type": "boolean",
+          "description": "If true (default), auto-creates all missing parent directories.",
+          "default": true
+        }
+      },
+      "required": ["filepath", "content"]
+    }
+  },
+  {
+    "name": "manage_zip",
+    "description": "Manages ZIP archives. Three actions: 'list' — get a detailed manifest of all entries and sizes; 'extract' — unpack the whole archive or a single internal file to a destination directory; 'create' — compress an entire directory into a new ZIP. Use 'list' before 'extract' to know what's inside. Use 'create' after agent modifications to package output for delivery.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["list", "extract", "create"],
+          "description": "Operation to perform: 'list' to inspect, 'extract' to unpack, 'create' to compress."
+        },
+        "filename": {
+          "type": "string",
+          "description": "Path to the ZIP file. For 'create', this is the output ZIP path to write."
+        },
+        "internal_file": {
+          "type": "string",
+          "description": "For 'extract' only. The specific internal entry to extract. Omit to extract all files."
+        },
+        "source_dir": {
+          "type": "string",
+          "description": "For 'create' only. Path to the directory whose contents will be compressed into the ZIP."
+        },
+        "extract_to": {
+          "type": "string",
+          "description": "For 'extract' only. Destination directory for extracted files. Defaults to './extracted/'."
+        }
+      },
+      "required": ["action", "filename"]
+    }
+  },
+  {
+    "name": "export_bridge",
+    "description": "Converts any file or ZIP into a Base64-encoded string payload, enabling the agent to deliver a download to the user in environments where direct filesystem access is unavailable. Returns filename, MIME type, byte size, and the full base64 string. Call this as the final step after all modifications are complete and packaged.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Path to the file to encode and export. Typically a final ZIP or output file."
+        },
+        "output_json": {
+          "type": "string",
+          "description": "Optional. Path to save the full base64 payload as a JSON sidecar file on disk."
+        }
+      },
+      "required": ["filename"]
+    }
+  }
+]

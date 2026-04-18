@@ -160,8 +160,8 @@ class StepExecutor:
                 "role": "user",
                 "content": REACT_USER.format(
                     step_description=step.description,
-                    context=context[:3000] if context else "(none)",
-                    memory=memory_recall[:1500] if memory_recall else "(none)",
+                    context=context[:12000] if context else "(none)",
+                    memory=memory_recall[:6000] if memory_recall else "(none)",
                 ),
             },
         ]

@@ -178,7 +178,7 @@ class Planner:
         self._cfg = llm_cfg
         self._tool_schema = tool_schema
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "google/gemma-4-26b-a4b-it")
+        self._model = llm_cfg.get("model", "moonshotai/kimi-k2.5")
         self._api_key = llm_cfg.get("api_key", "")
         self._memory_context = ""  # injected by agent from semantic memory
 

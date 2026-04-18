@@ -1339,7 +1339,7 @@ class CodeTranslatorTool(BaseTool):
             )
 
             payload = {
-                "model":       "google/gemma-3-27b-it:free",
+                "model":       "moonshotai/kimi-k2.5",
                 "max_tokens":  4000,
                 "temperature": 0.1,
                 "messages": [

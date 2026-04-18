@@ -55,6 +55,75 @@
     }
   },
   {
+    "name": "execute_code",
+    "description": "Executes Python code in an isolated subprocess sandbox. Captures stdout and stderr. Use this to test generated code, validate logic, run computations, or verify that a script works correctly before committing it. Timeout enforced — default 15s.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Valid Python 3 source code to execute. Must be self-contained — no imports that require unavailable packages."
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Max execution time in seconds. Defaults to 15. Increase for heavy computations.",
+          "default": 15
+        }
+      },
+      "required": ["code"]
+    }
+  },
+  {
+    "name": "web_search",
+    "description": "Searches the web using DuckDuckGo and returns top results with titles, snippets, and URLs. Use this to look up documentation, find error fixes, discover library versions, or retrieve any real-time information not available in training data.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query string. Be specific — include library names, version numbers, or error messages for best results."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of results to return. Defaults to 5.",
+          "default": 5
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "diff_patch",
+    "description": "Two operations: action='diff' generates a unified diff between two texts or file paths, showing exactly what changed (added/removed lines). action='patch' applies a unified diff string to a target file, making surgical edits without rewriting the entire file. Use diff before committing changes to verify them; use patch to apply minimal, targeted modifications.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": ["diff", "patch"],
+          "description": "'diff' to compare two texts/files, 'patch' to apply a unified diff to a file."
+        },
+        "original": {
+          "type": "string",
+          "description": "For 'diff': the original text or file path. For 'patch': the target file path or text to apply the patch to."
+        },
+        "modified": {
+          "type": "string",
+          "description": "For 'diff' only. The modified/new text or file path to compare against original."
+        },
+        "patch_str": {
+          "type": "string",
+          "description": "For 'patch' only. The unified diff string to apply. Must be valid unified diff format (as produced by action='diff')."
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Optional. For 'diff': path to save the .diff file. For 'patch': path to write the patched output (defaults to overwriting original file)."
+        }
+      },
+      "required": ["action", "original"]
+    }
+  },
+  {
     "name": "manage_zip",
     "description": "Manages ZIP archives. Three actions: 'list' — get a detailed manifest of all entries and sizes; 'extract' — unpack the whole archive or a single internal file to a destination directory; 'create' — compress an entire directory into a new ZIP. Use 'list' before 'extract' to know what's inside. Use 'create' after agent modifications to package output for delivery.",
     "parameters": {

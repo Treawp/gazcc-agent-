@@ -277,6 +277,143 @@ def export_bridge(filename: str, output_json: str = None) -> dict:
         return {"error": str(e), "filename": filename}
 
 
+
+# ─── 6. DIFF / PATCH ─────────────────────────────────────────────────────────
+
+import difflib as _difflib
+import re as _re
+
+
+def diff_patch(
+    action: str,
+    original: str = "",
+    modified: str = "",
+    patch_str: str = "",
+    output_path: str = None,
+) -> dict:
+    """
+    Two operations:
+      action='diff'  — generate a unified diff between two texts or file paths.
+      action='patch' — apply a unified diff string to original text/file.
+
+    Args:
+        action:      'diff' or 'patch'
+        original:    Raw text OR a file path (auto-detected).
+        modified:    Raw text OR a file path — required for 'diff'.
+        patch_str:   Unified diff string — required for 'patch'.
+        output_path: Optional. Path to save the diff output or patched file.
+
+    Returns:
+        dict with action-specific results.
+    """
+
+    def _load(src: str) -> tuple:
+        p = Path(src)
+        if len(src) < 512 and p.exists():
+            try:
+                return p.read_text(errors="replace"), str(p)
+            except Exception:
+                pass
+        return src, "<text>"
+
+    action = action.lower().strip()
+
+    # ── DIFF ──────────────────────────────────────────────────────────────────
+    if action == "diff":
+        if not original or not modified:
+            return {"error": "diff requires both 'original' and 'modified'."}
+
+        orig_text, orig_label = _load(original)
+        mod_text, mod_label = _load(modified)
+
+        diff_lines = list(
+            _difflib.unified_diff(
+                orig_text.splitlines(keepends=True),
+                mod_text.splitlines(keepends=True),
+                fromfile=orig_label,
+                tofile=mod_label,
+                lineterm="",
+            )
+        )
+
+        if not diff_lines:
+            return {"action": "diff", "changed": False, "diff": ""}
+
+        diff_str = "\n".join(diff_lines)
+
+        if output_path:
+            Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(output_path).write_text(diff_str)
+
+        lines_added   = len([l for l in diff_lines if l.startswith("+") and not l.startswith("+++")])
+        lines_removed = len([l for l in diff_lines if l.startswith("-") and not l.startswith("---")])
+
+        return {
+            "action": "diff",
+            "changed": True,
+            "lines_added": lines_added,
+            "lines_removed": lines_removed,
+            "diff": diff_str,
+            "saved_to": output_path,
+        }
+
+    # ── PATCH ─────────────────────────────────────────────────────────────────
+    elif action == "patch":
+        if not original:
+            return {"error": "patch requires 'original' (file path or text)."}
+        if not patch_str:
+            return {"error": "patch requires 'patch_str' (unified diff string)."}
+
+        orig_text, orig_label = _load(original)
+        orig_lines = orig_text.splitlines(keepends=True)
+
+        # Manual unified diff apply (pure stdlib)
+        result = list(orig_lines)
+        patch_lines = patch_str.splitlines(keepends=True)
+        offset = 0
+        i = 0
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            if line.startswith("@@"):
+                m = _re.search(r"-(\d+)(?:,\d+)? \+(\d+)(?:,\d+)?", line)
+                if not m:
+                    i += 1
+                    continue
+                orig_start = int(m.group(1)) - 1
+                i += 1
+                pos = orig_start + offset
+                removes, adds = [], []
+                while i < len(patch_lines) and not patch_lines[i].startswith("@@"):
+                    pl = patch_lines[i]
+                    if pl.startswith("-"):
+                        removes.append(pl[1:])
+                    elif pl.startswith("+"):
+                        adds.append(pl[1:])
+                    else:
+                        # context line — keep
+                        pass
+                    i += 1
+                del result[pos:pos + len(removes)]
+                result[pos:pos] = adds
+                offset += len(adds) - len(removes)
+            else:
+                i += 1
+
+        patched_text = "".join(result)
+
+        target = output_path or (original if Path(original).exists() else None)
+        if target:
+            p = Path(target)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(patched_text)
+            return {"action": "patch", "success": True, "written_to": target, "bytes": len(patched_text.encode())}
+
+        return {"action": "patch", "success": True, "patched_content": patched_text}
+
+    else:
+        return {"error": f"Unknown action '{action}'. Use: diff | patch"}
+
+
 # ─── SELF-TEST ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

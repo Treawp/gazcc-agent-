@@ -587,6 +587,163 @@ class ZipManageTool(BaseTool):
             return ToolResult(False, f"Action tidak valid: '{action}'. Gunakan: list, extract, create.")
 
 
+# ── diff / patch tool ─────────────────────────────────────────────────────────
+
+import difflib as _difflib
+
+
+class DiffPatchTool(BaseTool):
+    """
+    Two operations in one tool:
+      action='diff'  — generate a unified diff between two texts or file paths.
+      action='patch' — apply a unified diff string to a target file, write result back.
+    """
+    name = "diff_patch"
+    description = (
+        "Generate a unified diff between two texts/files (action='diff'), "
+        "or apply a unified diff patch to a file (action='patch'). "
+        "Use 'diff' to compare original vs modified content before committing changes. "
+        "Use 'patch' to apply surgical edits without rewriting the entire file."
+    )
+    parameters = (
+        "action: str ('diff'|'patch'), "
+        "original: str (text or file path), "
+        "modified: str (text or file path, for diff) | patch_str: str (unified diff, for patch), "
+        "output_path: str | None"
+    )
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load(src: str) -> tuple[str, str]:
+        """Return (content, label). If src looks like an existing path, read it; else treat as raw text."""
+        p = Path(src)
+        if len(src) < 512 and p.exists():
+            try:
+                return p.read_text(errors="replace"), str(p)
+            except Exception:
+                pass
+        return src, "<text>"
+
+    # ── run ────────────────────────────────────────────────────────────────────
+
+    async def run(
+        self,
+        action: str,
+        original: str = "",
+        modified: str = "",
+        patch_str: str = "",
+        output_path: str | None = None,
+    ) -> ToolResult:
+
+        action = action.lower().strip()
+
+        # ── DIFF ──────────────────────────────────────────────────────────────
+        if action == "diff":
+            if not original or not modified:
+                return ToolResult(False, "diff requires both 'original' and 'modified'.")
+            orig_text, orig_label = self._load(original)
+            mod_text, mod_label = self._load(modified)
+
+            diff_lines = list(
+                _difflib.unified_diff(
+                    orig_text.splitlines(keepends=True),
+                    mod_text.splitlines(keepends=True),
+                    fromfile=orig_label,
+                    tofile=mod_label,
+                    lineterm="",
+                )
+            )
+            if not diff_lines:
+                return ToolResult(True, "(no differences)", {"changed": False})
+
+            diff_str = "\n".join(diff_lines)
+
+            if output_path:
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(output_path).write_text(diff_str)
+
+            return ToolResult(
+                True,
+                diff_str,
+                {
+                    "changed": True,
+                    "lines_changed": len([l for l in diff_lines if l.startswith(("+", "-")) and not l.startswith(("+++", "---"))]),
+                    "saved_to": output_path,
+                },
+            )
+
+        # ── PATCH ─────────────────────────────────────────────────────────────
+        elif action == "patch":
+            if not original:
+                return ToolResult(False, "patch requires 'original' (file path or text).")
+            if not patch_str:
+                return ToolResult(False, "patch requires 'patch_str' (unified diff string).")
+
+            orig_text, orig_label = self._load(original)
+            orig_lines = orig_text.splitlines(keepends=True)
+
+            try:
+                patched_lines = list(
+                    _difflib._patch_files(  # type: ignore[attr-defined]
+                        orig_lines, patch_str.splitlines(keepends=True)
+                    )
+                )
+            except AttributeError:
+                # _patch_files is private; manual apply fallback
+                patched_lines = self._manual_apply(orig_lines, patch_str)
+
+            patched_text = "".join(patched_lines)
+
+            # Write back
+            target = output_path or (original if Path(original).exists() else None)
+            if target:
+                p = Path(target)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(patched_text)
+                return ToolResult(True, f"Patch applied and written to {target}", {"output": target, "size": len(patched_text)})
+            else:
+                return ToolResult(True, patched_text, {"note": "No output_path — returning patched content only"})
+
+        else:
+            return ToolResult(False, f"Unknown action '{action}'. Use: diff | patch")
+
+    # ── manual patch fallback (pure stdlib) ───────────────────────────────────
+    @staticmethod
+    def _manual_apply(orig_lines: list[str], patch_str: str) -> list[str]:
+        """Best-effort line-level patch application from a unified diff string."""
+        result = list(orig_lines)
+        patch_lines = patch_str.splitlines(keepends=True)
+        offset = 0
+        i = 0
+        while i < len(patch_lines):
+            line = patch_lines[i]
+            if line.startswith("@@"):
+                import re
+                m = re.search(r"-(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))?", line)
+                if not m:
+                    i += 1
+                    continue
+                orig_start = int(m.group(1)) - 1
+                i += 1
+                pos = orig_start + offset
+                removes, adds = [], []
+                while i < len(patch_lines) and not patch_lines[i].startswith("@@"):
+                    pl = patch_lines[i]
+                    if pl.startswith("-"):
+                        removes.append(pl[1:])
+                    elif pl.startswith("+"):
+                        adds.append(pl[1:])
+                    i += 1
+                # Replace removes with adds at pos
+                del result[pos:pos + len(removes)]
+                result[pos:pos] = adds
+                offset += len(adds) - len(removes)
+            else:
+                i += 1
+        return result
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 class ToolRegistry:
@@ -600,7 +757,7 @@ class ToolRegistry:
 
         if enabled.get("file_ops", True):
             for tool in [ReadFileTool(), WriteFileTool(), AppendFileTool(), ListDirTool(), DeleteFileTool(),
-                         ZipManageTool(), ExportFileBase64Tool(), ExportFileLinkTool()]:
+                         ZipManageTool(), ExportFileBase64Tool(), ExportFileLinkTool(), DiffPatchTool()]:
                 self._register(tool)
 
         if enabled.get("fetch_url", True):

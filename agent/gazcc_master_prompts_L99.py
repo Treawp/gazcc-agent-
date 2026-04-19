@@ -489,6 +489,70 @@ Check each layer in order:
 # ENTRY POINT — Print all prompts for inspection
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════════
+# [11] FILE WRITE SAFETY
+# Instruksi wajib untuk agent saat menulis file besar (HTML/JS/Python).
+# Mencegah file terpotong karena context window limit atau timeout.
+# Inject prompt ini sebagai system context sebelum task code generation.
+# ══════════════════════════════════════════════════════════════════════════════
+
+PROMPT_FILE_WRITE_SAFETY = """
+╔══════════════════════════════════════════════════════╗
+║  GAZCC FILE WRITE SAFETY — WAJIB DIIKUTI             ║
+╚══════════════════════════════════════════════════════╝
+
+ATURAN INI BERLAKU untuk semua task yang menghasilkan file
+(HTML, JS, Python, atau file teks apapun).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 1 — CEK UKURAN SEBELUM NULIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Estimasi jumlah baris output sebelum mulai generate.
+
+- File < 300 baris  → boleh write_file sekaligus
+- File ≥ 300 baris  → WAJIB pakai metode chunk (lihat Rule 2)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 2 — METODE CHUNK UNTUK FILE BESAR
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Untuk file ≥ 300 baris, ikuti urutan ini TANPA SKIP:
+
+  Step 1: write_file(path, CHUNK_1)
+          → Chunk 1 = bagian paling awal file
+            (untuk HTML: mulai dari <!DOCTYPE> sampai akhir <style>)
+
+  Step 2: append_file(path, CHUNK_2)
+          → Chunk 2 = bagian tengah
+            (untuk HTML: semua JS logic utama)
+
+  Step 3: append_file(path, CHUNK_N)
+          → Ulangi sampai seluruh konten selesai
+            (untuk HTML: pastikan chunk terakhir berisi </body></html>)
+
+  Step 4: validate_file(path)
+          → CEK WAJIB. Tunggu response.
+          → Jika valid: true  → lanjut ke FINAL ANSWER
+          → Jika valid: false → JANGAN kirim FINAL ANSWER,
+                                perbaiki file dulu lalu validate ulang
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 3 — LARANGAN KERAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ JANGAN kirim FINAL ANSWER sebelum validate_file return valid: true
+❌ JANGAN tulis file HTML tanpa <!DOCTYPE html> di baris pertama
+❌ JANGAN tulis file yang diawali potongan kode (misal: "{ id:", "};", "],")
+❌ JANGAN assume file sudah lengkap tanpa validate_file
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULE 4 — FORMAT FINAL ANSWER SETELAH FILE SELESAI
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Setelah validate_file return valid: true, sertakan di FINAL ANSWER:
+  - Nama file yang dibuat
+  - Ukuran file (bytes / baris)
+  - Hasil validate_file (valid: true)
+  - export_marker dari get_file_as_base64 agar user bisa download
+"""
+
 PROMPT_REGISTRY = {
     "TOOL_BUILDER":              PROMPT_TOOL_BUILDER,
     "REACT_CHAIN_DESIGNER":      PROMPT_REACT_CHAIN_DESIGNER,
@@ -500,6 +564,7 @@ PROMPT_REGISTRY = {
     "SELF_EVOLUTION_FEEDBACK":   PROMPT_SELF_EVOLUTION_FEEDBACK,
     "PROACTIVE_MONITOR_DESIGNER":PROMPT_PROACTIVE_MONITOR_DESIGNER,
     "L99_UPGRADE_VERIFIER":      PROMPT_L99_UPGRADE_VERIFIER,
+    "FILE_WRITE_SAFETY":         PROMPT_FILE_WRITE_SAFETY,
 }
 
 

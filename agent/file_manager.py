@@ -126,16 +126,131 @@ def read_file(filepath: str) -> dict:
 
 
 # ── TOOL 4: write_file ───────────────────────────────────────────────────────
-def write_file(filepath: str, content: str) -> dict:
-    """Buat atau overwrite file. Parent dirs dibuat otomatis."""
+def _validate_content(filepath: str, content: str) -> Optional[str]:
+    """
+    Validasi konten sebelum disimpan. Return pesan error jika tidak valid, None jika OK.
+    Mencegah file terpotong / tidak lengkap tersimpan ke disk.
+    """
+    ext = Path(filepath).suffix.lower()
+
+    if ext in (".html", ".htm"):
+        # Wajib ada struktur HTML lengkap
+        if "<!doctype" not in content.lower() and "<html" not in content.lower():
+            return "HTML file tidak punya <!DOCTYPE> atau <html>. File kemungkinan terpotong di bagian atas."
+        if "</html>" not in content.lower():
+            return "HTML file tidak punya </html>. File kemungkinan terpotong di bagian bawah."
+        if "<body" not in content.lower():
+            return "HTML file tidak punya <body>. Struktur tidak lengkap."
+        # Cek ukuran minimum — HTML valid harusnya > 200 char
+        if len(content.strip()) < 200:
+            return f"HTML file terlalu kecil ({len(content)} char). Kemungkinan konten hilang."
+
+    elif ext in (".js",):
+        # JS tidak boleh diawali dengan syntax yang jelas merupakan potongan (misal baris pertama adalah closing brace atau array entry)
+        first_line = content.lstrip().splitlines()[0] if content.strip() else ""
+        if first_line.startswith(("};", "],", "},", "});", "{ id:")):
+            return f"JS file diawali dengan '{first_line[:40]}'. Kemungkinan terpotong — bagian atas hilang."
+
+    elif ext in (".py",):
+        if len(content.strip()) < 10:
+            return f"Python file terlalu kecil ({len(content)} char). Kemungkinan konten hilang."
+
+    return None  # valid
+
+
+def write_file(filepath: str, content: str, force: bool = False) -> dict:
+    """
+    Buat atau overwrite file. Parent dirs dibuat otomatis.
+
+    PENTING: Sebelum menyimpan, tool ini memvalidasi kelengkapan konten
+    untuk mencegah file terpotong tersimpan ke disk.
+
+    Args:
+        filepath : path file relatif ke sandbox
+        content  : konten yang akan ditulis
+        force    : jika True, skip validasi dan langsung tulis (pakai hati-hati!)
+    """
     try:
-        target = _resolve(filepath)
+        target  = _resolve(filepath)
         created = not target.parent.exists()
         target.parent.mkdir(parents=True, exist_ok=True)
+
+        # ── Validasi konten (kecuali force=True) ────────────────────────────
+        if not force:
+            err_msg = _validate_content(filepath, content)
+            if err_msg:
+                return _err(
+                    f"WRITE DIBATALKAN — Konten tidak valid: {err_msg} "
+                    f"| Gunakan force=True untuk bypass validasi, atau perbaiki konten dulu.",
+                    "CONTENT_INVALID"
+                )
+
         target.write_text(content, encoding="utf-8")
-        return _ok({"filepath": str(target.relative_to(SANDBOX_ROOT)),
-                    "bytes_written": target.stat().st_size, "created_dirs": created})
+        size = target.stat().st_size
+        return _ok({
+            "filepath":      str(target.relative_to(SANDBOX_ROOT)),
+            "bytes_written": size,
+            "created_dirs":  created,
+            "validated":     not force,
+            "warning":       "Validasi dilewati (force=True)" if force else None
+        })
     except Exception as e: return _err(str(e), "ERROR")
+
+
+# ── TOOL 4b: append_file ────────────────────────────────────────────────────
+def append_file(filepath: str, content: str) -> dict:
+    """
+    Tambahkan konten ke akhir file yang sudah ada (atau buat baru jika belum ada).
+    Gunakan tool ini untuk menulis file BESAR secara bertahap (chunk per chunk)
+    agar tidak terpotong karena context window limit.
+
+    Workflow yang benar untuk file besar:
+      1. write_file(path, chunk_pertama)   ← tulis awal file (HTML head, dll)
+      2. append_file(path, chunk_kedua)    ← tambah bagian berikutnya
+      3. append_file(path, chunk_ketiga)   ← dst...
+      4. validate_file(path)               ← verifikasi hasil akhir
+    """
+    try:
+        target = _resolve(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(content)
+        size = target.stat().st_size
+        return _ok({
+            "filepath":      str(target.relative_to(SANDBOX_ROOT)),
+            "total_bytes":   size,
+            "appended_bytes": len(content.encode("utf-8")),
+        })
+    except Exception as e: return _err(str(e), "ERROR")
+
+
+# ── TOOL 4c: validate_file ──────────────────────────────────────────────────
+def validate_file(filepath: str) -> dict:
+    """
+    Validasi kelengkapan file yang sudah tersimpan di disk.
+    Gunakan setelah selesai nulis/append untuk memastikan file tidak terpotong.
+    Return status 'valid' atau 'invalid' beserta detail masalahnya.
+    """
+    try:
+        target = _resolve(filepath, must_exist=True)
+        content = target.read_text(encoding="utf-8")
+        err_msg = _validate_content(filepath, content)
+        if err_msg:
+            return _ok({
+                "filepath": str(target.relative_to(SANDBOX_ROOT)),
+                "valid":    False,
+                "issue":    err_msg,
+                "size_bytes": target.stat().st_size,
+                "lines":    content.count("\n") + 1,
+            })
+        return _ok({
+            "filepath": str(target.relative_to(SANDBOX_ROOT)),
+            "valid":    True,
+            "size_bytes": target.stat().st_size,
+            "lines":    content.count("\n") + 1,
+        })
+    except FileNotFoundError as e: return _err(str(e), "NOT_FOUND")
+    except Exception as e:         return _err(str(e), "ERROR")
 
 
 # ── TOOL 5: manage_zip ───────────────────────────────────────────────────────
@@ -324,6 +439,8 @@ TOOL_MAP = {
     "list_files":             list_files,
     "read_file":              read_file,
     "write_file":             write_file,
+    "append_file":            append_file,
+    "validate_file":          validate_file,
     "manage_zip":             manage_zip,
     "search_in_files":        search_in_files,
     "move_or_rename_file":    move_or_rename_file,

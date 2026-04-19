@@ -237,7 +237,7 @@ class SandboxExecutor:
         self._llm_cfg = cfg.get("llm", {})
         self._tools = SandboxTools(cfg)
         self._base_url = self._llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = self._llm_cfg.get("model", "moonshotai/kimi-k2.5")
+        self._model = self._llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
         self._api_key = self._llm_cfg.get("api_key", "")
         self._history: list[dict] = []
         self._memory: dict[str, str] = {}

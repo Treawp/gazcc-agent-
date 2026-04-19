@@ -26,6 +26,7 @@ tools:
   file_ops: true
   code_exec: false
   code_exec_timeout: 15
+  extra_tools: true   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
 
 vercel:
   redis_url: ${UPSTASH_REDIS_REST_URL}

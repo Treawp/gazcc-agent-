@@ -7,3 +7,13 @@ pyyaml>=6.0.1
 upstash-redis>=1.1.0
 python-dotenv>=1.0.1
 Pillow>=10.0.0
+
+# Extra Tools Pack
+matplotlib>=3.8.0        # DataVizTool
+python-whois>=0.9.4      # WhoisTool (fallback ke socket jika tidak ada)
+dnspython>=2.6.0         # DNSLookupTool
+markdown>=3.5.0          # MarkdownToHTMLTool
+html2text>=2024.2.26     # HTMLToMarkdownTool
+pytesseract>=0.3.13      # OCRTool (juga butuh tesseract-ocr system package)
+playwright>=1.43.0       # ScreenshotTool (optional, ada fallback)
+# tiktoken>=0.7.0        # TokenCounterTool (optional, ada char-estimate fallback)

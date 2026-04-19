@@ -17,7 +17,7 @@ agent:
 memory:
   backend: redis
   file_path: /tmp/gazcc_memory
-  max_entries: 500
+  max_entries: 800
   similarity_threshold: 0.3
 
 tools:
@@ -26,7 +26,9 @@ tools:
   file_ops: true
   code_exec: false
   code_exec_timeout: 15
-  extra_tools: true   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
+  extra_tools: true
+  github_tools: true
+  github_token: ""    # opsional — isi untuk rate limit 5000/hr vs 60/hr tanpa token   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
 
 vercel:
   redis_url: ${UPSTASH_REDIS_REST_URL}

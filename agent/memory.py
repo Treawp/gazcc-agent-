@@ -7,12 +7,23 @@ Backends: file (local) | redis (Vercel/Upstash)
 import json
 import math
 import os
+import re
 import time
+import uuid
 import asyncio
 import aiofiles
 from collections import Counter
 from typing import Any, Optional
 from pathlib import Path
+
+
+# ── Privacy Filter ────────────────────────────────────────────────────────────
+
+_PRIVATE_RE = re.compile(r"<private>.*?</private>", re.IGNORECASE | re.DOTALL)
+
+def strip_private(text: str) -> str:
+    """Remove <private>...</private> blocks before storing to memory."""
+    return _PRIVATE_RE.sub("[REDACTED]", text).strip()
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -43,14 +54,17 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # ── MemoryEntry ───────────────────────────────────────────────────────────────
 
 class MemoryEntry:
-    __slots__ = ("key", "content", "metadata", "timestamp", "tokens")
+    __slots__ = ("key", "content", "metadata", "timestamp", "tokens", "obs_id", "token_cost")
 
     def __init__(self, key: str, content: str, metadata: dict | None = None):
         self.key = key
-        self.content = content
+        self.content = strip_private(content)
         self.metadata = metadata or {}
         self.timestamp = time.time()
-        self.tokens = _tokenize(content)
+        self.tokens = _tokenize(self.content)
+        self.obs_id: str = str(uuid.uuid4())
+        # Rough token cost: ~4 chars per token
+        self.token_cost: int = max(1, len(self.content) // 4)
 
     def to_dict(self) -> dict:
         return {
@@ -58,12 +72,20 @@ class MemoryEntry:
             "content": self.content,
             "metadata": self.metadata,
             "timestamp": self.timestamp,
+            "obs_id": self.obs_id,
+            "token_cost": self.token_cost,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "MemoryEntry":
-        e = cls(d["key"], d["content"], d.get("metadata", {}))
+        e = cls.__new__(cls)
+        e.key = d["key"]
+        e.content = d["content"]
+        e.metadata = d.get("metadata", {})
         e.timestamp = d.get("timestamp", time.time())
+        e.tokens = _tokenize(e.content)
+        e.obs_id = d.get("obs_id", str(uuid.uuid4()))
+        e.token_cost = d.get("token_cost", max(1, len(e.content) // 4))
         return e
 
 
@@ -142,6 +164,40 @@ class FileMemory:
         async with self._lock:
             await self._load()
             return list(self._entries.keys())
+
+    async def all_entries(self) -> list[MemoryEntry]:
+        async with self._lock:
+            await self._load()
+            return sorted(self._entries.values(), key=lambda e: e.timestamp, reverse=True)
+
+    async def retrieve_by_obs_id(self, obs_id: str) -> Optional[MemoryEntry]:
+        async with self._lock:
+            await self._load()
+            for entry in self._entries.values():
+                if entry.obs_id == obs_id:
+                    return entry
+            return None
+
+    async def search_with_scores(
+        self, query: str, top_k: int = 5, threshold: float = 0.2
+    ) -> list[tuple[float, MemoryEntry]]:
+        """Like search() but returns (score, entry) pairs for progressive disclosure."""
+        async with self._lock:
+            await self._load()
+            if not self._entries:
+                return []
+            all_tokens: list[str] = []
+            for e in self._entries.values():
+                all_tokens.extend(e.tokens)
+            vocab = {w: i for i, w in enumerate(set(all_tokens))}
+            q_vec = _tfidf_vector(_tokenize(query), vocab)
+            results = []
+            for entry in self._entries.values():
+                score = _cosine(q_vec, _tfidf_vector(entry.tokens, vocab))
+                if score >= threshold:
+                    results.append((score, entry))
+            results.sort(key=lambda x: -x[0])
+            return results[:top_k]
 
 
 # ── RedisMemory ───────────────────────────────────────────────────────────────

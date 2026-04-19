@@ -26,6 +26,7 @@ from .strategic_tools import (
 from .gazcc_tools_expansion import register_expansion_tools
 from .extra_tools import register_extra_tools
 from .github_tool import register_github_tools
+from .skill_tools import register_skill_tools
 
 logger = logging.getLogger("gazcc.agent")
 logging.basicConfig(
@@ -118,6 +119,7 @@ class GazccAgent:
         register_expansion_tools(self._tools, self._cfg)
         register_extra_tools(self._tools, self._cfg)
         register_github_tools(self._tools, self._cfg)
+        register_skill_tools(self._tools, self._cfg)
 
         self._planner = Planner(self._llm_cfg, self._tools.schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)

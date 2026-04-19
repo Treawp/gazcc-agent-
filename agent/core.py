@@ -121,7 +121,7 @@ class GazccAgent:
         register_github_tools(self._tools, self._cfg)
         register_skill_tools(self._tools, self._cfg)
 
-        self._planner = Planner(self._llm_cfg, self._tools.schema_string())
+        self._planner = Planner(self._llm_cfg, self._tools.slim_schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)
         self._sem_mem = _sem_mem  # direct reference for pre-task memory recall
 
@@ -224,9 +224,14 @@ class GazccAgent:
 
                     # Memory recall relevant to this step
                     mem_results = await self._memory.search(step.description, top_k=3)
-                    mem_text = "\n".join(f"• [{e.key}]: {e.content[:300]}" for e in mem_results)
+                    mem_text = "\n".join(
+                        f"• [{e.key}]: {e.content[:200]}" for e in mem_results
+                    )[:1200]  # hard cap ~300 tok
 
-                    context_str = "\n---\n".join(context_parts[-5:])  # last 5 step results
+                    # Context from prev steps — last 3 only, 800 chars each
+                    context_str = "\n---\n".join(
+                        p[:800] for p in context_parts[-3:]
+                    )
 
                     # Executor event bridge
                     exec_events: list[dict] = []

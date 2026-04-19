@@ -1929,6 +1929,51 @@ class ToolRegistry:
             lines.append(f"  {t.name}({t.parameters})\n    → {t.description}")
         return "\n".join(lines)
 
+    def slim_schema_string(self) -> str:
+        """
+        Compressed schema — drops verbose multi-sentence descriptions,
+        keeps only tool name + first sentence of description + params.
+        ~50-60% fewer tokens than schema_string().
+        """
+        lines = []
+        for t in self._tools.values():
+            # Keep only first sentence of description
+            short_desc = t.description.split(".")[0].strip()
+            # Trim params to first 120 chars if too long
+            params = t.parameters[:120] + "…" if len(t.parameters) > 120 else t.parameters
+            lines.append(f"  {t.name}({params}) → {short_desc}")
+        return "\n".join(lines)
+
+    def step_schema_string(self, tool_hints: list[str], core_tools: list[str] | None = None) -> str:
+        """
+        Per-step schema — only includes schemas for hinted tools + a small set
+        of always-available core tools. Saves ~60-70% tokens vs full schema_string().
+
+        Args:
+            tool_hints: tool names relevant to current step (from plan tool_hint)
+            core_tools: tools always included regardless of hint
+        """
+        _core = set(core_tools or ["web_search", "fetch_url", "write_file", "read_file",
+                                    "run_code", "shell", "mem_search", "mem_store"])
+        target = set(tool_hints) | _core
+        lines = []
+        # First: hinted tools (full desc)
+        for name in tool_hints:
+            t = self._tools.get(name)
+            if t:
+                lines.append(f"  {t.name}({t.parameters})\n    → {t.description}")
+        # Then: core tools (slim desc)
+        for name in _core - set(tool_hints):
+            t = self._tools.get(name)
+            if t:
+                short = t.description.split(".")[0].strip()
+                lines.append(f"  {t.name} → {short}")
+        # Finally: list remaining tool names only (no desc)
+        rest = [n for n in self._tools if n not in target]
+        if rest:
+            lines.append(f"\n  (other available: {', '.join(rest)})")
+        return "\n".join(lines)
+
     async def run(self, name: str, args: dict) -> ToolResult:
         tool = self.get(name)
         if tool is None:

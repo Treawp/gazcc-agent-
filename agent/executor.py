@@ -133,6 +133,9 @@ def _parse_react(text: str) -> dict:
 
 class StepExecutor:
     MAX_REACT_TURNS = 8
+    MAX_HISTORY_PAIRS = 6      # window: keep last N user/assistant pairs
+    MAX_CONTEXT_CHARS = 3000   # truncate step context from previous steps
+    MAX_MEMORY_CHARS = 1200    # truncate memory recall
 
     def __init__(self, llm_cfg: dict, tools: ToolRegistry, retry_limit: int = 3):
         self._cfg = llm_cfg
@@ -141,6 +144,39 @@ class StepExecutor:
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
         self._model = llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
         self._api_key = llm_cfg.get("api_key", "")
+
+    def _build_system(self, step_tool_hint: str = "") -> str:
+        """
+        Per-step schema injection.
+        If step has a tool_hint, inject full schema only for that tool + slim core.
+        Otherwise use slim_schema_string() — saves ~1500-2800 tok vs full schema.
+        """
+        if step_tool_hint and hasattr(self._tools, "step_schema_string"):
+            schema = self._tools.step_schema_string([step_tool_hint])
+        elif hasattr(self._tools, "slim_schema_string"):
+            schema = self._tools.slim_schema_string()
+        else:
+            schema = self._tools.schema_string()
+        return REACT_SYSTEM.format(tool_schema=schema)
+
+    @staticmethod
+    def _window_messages(messages: list[dict], max_pairs: int) -> list[dict]:
+        """
+        Keep system message + first user message + last N user/assistant pairs.
+        Prevents unbounded history growth during long ReAct loops.
+        """
+        if len(messages) <= 2 + max_pairs * 2:
+            return messages
+        system = [m for m in messages if m["role"] == "system"]
+        turns = [m for m in messages if m["role"] != "system"]
+        # Always keep first user message (task description)
+        first = turns[:1]
+        # Keep last max_pairs * 2 messages
+        recent = turns[-(max_pairs * 2):]
+        # Avoid duplicate if first is already in recent
+        if recent and first and recent[0] == first[0]:
+            return system + recent
+        return system + first + recent
 
     async def execute_step(
         self,
@@ -154,14 +190,18 @@ class StepExecutor:
         Returns (success, result_string).
         on_event(event_type, data) called for streaming progress.
         """
+        # Truncate inputs — don't let context bloat the prompt
+        ctx_trimmed  = context[:self.MAX_CONTEXT_CHARS] + ("…" if len(context) > self.MAX_CONTEXT_CHARS else "") if context else "(none)"
+        mem_trimmed  = memory_recall[:self.MAX_MEMORY_CHARS] + ("…" if len(memory_recall) > self.MAX_MEMORY_CHARS else "") if memory_recall else "(none)"
+
         messages = [
-            {"role": "system", "content": REACT_SYSTEM.format(tool_schema=self._tools.schema_string())},
+            {"role": "system", "content": self._build_system(getattr(step, "tool_hint", ""))},
             {
                 "role": "user",
                 "content": REACT_USER.format(
                     step_description=step.description,
-                    context=context[:25000] if context else "(none)",
-                    memory=memory_recall[:20000] if memory_recall else "(none)",
+                    context=ctx_trimmed,
+                    memory=mem_trimmed,
                 ),
             },
         ]
@@ -217,6 +257,9 @@ class StepExecutor:
 
             messages.append({"role": "assistant", "content": llm_output})
             messages.append({"role": "user", "content": f"Observation: {observation}\n\nContinue."})
+
+            # Window history to prevent unbounded growth
+            messages = self._window_messages(messages, self.MAX_HISTORY_PAIRS)
 
         # Exhausted turns without Final Answer
         return False, "Max ReAct turns reached without completion."

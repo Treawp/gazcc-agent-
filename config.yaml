@@ -17,7 +17,7 @@ agent:
 memory:
   backend: redis
   file_path: /tmp/gazcc_memory
-  max_entries: 800
+  max_entries: 500
   similarity_threshold: 0.3
 
 tools:
@@ -28,7 +28,49 @@ tools:
   code_exec_timeout: 15
   extra_tools: true
   github_tools: true
-  github_token: ""    # opsional — isi untuk rate limit 5000/hr vs 60/hr tanpa token   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
+  github_token: ""    # opsional — isi untuk rate limit 5000/hr vs 60/hr tanpa token
+  skill_tools: true     # grill_me, frontend_design, theme_factory, browser_use, trailofbits_security, skill_creator, superpowers_skills
+  skill_tools_model: "" # override model untuk skill tools (kosong = pakai model utama)   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
+
+# ── Memory Viewer ─────────────────────────────────────────────────────────────
+# Web UI: http://localhost:37777
+# Endpoints:
+#   GET  /                          → HTML viewer (real-time SSE stream)
+#   GET  /api/observations          → list all observations (paginated)
+#   GET  /api/observation/{obs_id}  → citation lookup by ID
+#   GET  /api/stream                → SSE event feed
+#   GET  /api/stats                 → memory stats
+#   POST /api/search                → { "query": "...", "top_k": 5 }
+memory_viewer:
+  enabled: true
+  host: "127.0.0.1"
+  port: 37777
+  launch_on_start: true   # auto-launch when agent starts (local only, not Vercel)
+
+# ── Context Injection ─────────────────────────────────────────────────────────
+# Fine-grained control over what context gets injected into each agent turn.
+context:
+  inject_memory:      true   # inject relevant memory into prompt
+  inject_task_state:  true   # inject current task state (step progress, etc.)
+  inject_tool_list:   true   # inject list of available tools
+  inject_system_time: true   # inject current UTC time
+  inject_file_tree:   false  # inject workspace file tree (can be noisy)
+  max_memory_tokens:  1500   # token budget for memory injection
+  memory_tiers:              # which progressive-disclosure tiers to include
+    - core
+    - extended
+  strip_private:      true   # always strip <private>...</private> blocks
+
+# ── Beta Channel ──────────────────────────────────────────────────────────────
+# Experimental features. Toggle here to enable/disable without code changes.
+beta:
+  enabled: false
+  features:
+    endless_mode:       false  # agent auto-continues after task_done (use carefully)
+    vector_embeddings:  false  # upgrade TF-IDF to real embeddings (requires tiktoken)
+    memory_compression: false  # compress old entries into summaries to save tokens
+    auto_citation:      false  # auto-insert [obs_id] citations in agent responses
+    multi_agent:        false  # parallel sub-agents for independent plan steps
 
 vercel:
   redis_url: ${UPSTASH_REDIS_REST_URL}

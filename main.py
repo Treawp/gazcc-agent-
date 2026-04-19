@@ -169,6 +169,22 @@ async def main():
 
     agent = GazccAgent(cfg)
 
+    # Launch memory viewer if configured
+    viewer_cfg = cfg.get("memory_viewer", {})
+    if viewer_cfg.get("enabled", True) and viewer_cfg.get("launch_on_start", True):
+        try:
+            from agent.memory_viewer import start_viewer
+            asyncio.create_task(
+                start_viewer(
+                    agent._memory,
+                    host=viewer_cfg.get("host", "127.0.0.1"),
+                    port=viewer_cfg.get("port", 37777),
+                )
+            )
+            print(c(f"  Memory Viewer → http://{viewer_cfg.get('host','127.0.0.1')}:{viewer_cfg.get('port',37777)}", DIM))
+        except Exception as ve:
+            print(c(f"  Memory viewer skipped: {ve}", DIM))
+
     async for event in agent.stream(task, task_id=args.task_id):
         if args.json_events:
             print(json.dumps(event.to_dict(), ensure_ascii=False))

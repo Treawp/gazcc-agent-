@@ -4,12 +4,14 @@ Vercel serverless entry point.
 Exposes GazccThinking Agent via FastAPI REST + Server-Sent Events.
 
 Endpoints:
-  POST /api/run          – submit task, stream events via SSE
-  POST /api/task         – submit task async (returns task_id immediately)
-  GET  /api/task/{id}    – poll task status
-  GET  /api/memory       – list memory keys
-  GET  /api/tools        – list available tools
-  GET  /                 – health check
+  POST /api/run              – submit task, stream events via SSE
+  POST /api/task             – submit task async (returns task_id immediately)
+  GET  /api/task/{id}        – poll task status
+  GET  /api/memory           – list / search memory entries (paginated, with token cost)
+  GET  /api/memory/stats     – memory stats (count, total tokens, oldest/newest)
+  GET  /api/observation/{id} – citation lookup — get single observation by obs_id
+  GET  /api/tools            – list available tools
+  GET  /                     – health check
 """
 
 import asyncio
@@ -241,15 +243,97 @@ async def get_task(task_id: str):
 
 
 @app.get("/api/memory")
-async def list_memory(q: str = Query("", description="Search query")):
-    """List or search memory entries."""
+async def list_memory(
+    q: str = Query("", description="Search query"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """List or search memory entries with pagination and token cost."""
     from agent.memory import build_memory
     mem = build_memory(CFG.get("memory", {}))
     if q:
-        entries = await mem.search(q, top_k=10)
-        return {"query": q, "results": [{"key": e.key, "content": e.content[:500], "metadata": e.metadata} for e in entries]}
-    keys = await mem.all_keys()
-    return {"keys": keys, "count": len(keys)}
+        if hasattr(mem, "search_with_scores"):
+            scored = await mem.search_with_scores(q, top_k=limit)
+            return {
+                "query": q,
+                "results": [
+                    {
+                        "key":        e.key,
+                        "content":    e.content[:500],
+                        "metadata":   e.metadata,
+                        "obs_id":     e.obs_id,
+                        "token_cost": e.token_cost,
+                        "score":      round(s, 4),
+                        "timestamp":  e.timestamp,
+                    }
+                    for s, e in scored
+                ],
+            }
+        entries = await mem.search(q, top_k=limit)
+        return {"query": q, "results": [e.to_dict() for e in entries]}
+
+    if hasattr(mem, "all_entries"):
+        entries = await mem.all_entries()
+    else:
+        keys = await mem.all_keys()
+        entries = []
+        for k in keys:
+            e = await mem.retrieve(k)
+            if e:
+                entries.append(e)
+
+    total = len(entries)
+    page  = entries[offset: offset + limit]
+    return {
+        "total":   total,
+        "offset":  offset,
+        "limit":   limit,
+        "entries": [e.to_dict() for e in page],
+    }
+
+
+@app.get("/api/observation/{obs_id}")
+async def get_observation_by_id(obs_id: str):
+    """Citation lookup — retrieve a single observation by its obs_id."""
+    from agent.memory import build_memory
+    from fastapi import HTTPException
+    mem = build_memory(CFG.get("memory", {}))
+    if hasattr(mem, "retrieve_by_obs_id"):
+        entry = await mem.retrieve_by_obs_id(obs_id)
+    else:
+        keys = await mem.all_keys()
+        entry = None
+        for k in keys:
+            e = await mem.retrieve(k)
+            if e and getattr(e, "obs_id", None) == obs_id:
+                entry = e
+                break
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"obs_id '{obs_id}' not found")
+    return JSONResponse(entry.to_dict())
+
+
+@app.get("/api/memory/stats")
+async def memory_stats():
+    """Memory statistics: count, total tokens, oldest/newest entries."""
+    from agent.memory import build_memory
+    mem = build_memory(CFG.get("memory", {}))
+    if hasattr(mem, "all_entries"):
+        entries = await mem.all_entries()
+    else:
+        keys = await mem.all_keys()
+        entries = []
+        for k in keys:
+            e = await mem.retrieve(k)
+            if e:
+                entries.append(e)
+    total_tokens = sum(getattr(e, "token_cost", 0) for e in entries)
+    return JSONResponse({
+        "count":        len(entries),
+        "total_tokens": total_tokens,
+        "oldest":       min((e.timestamp for e in entries), default=0),
+        "newest":       max((e.timestamp for e in entries), default=0),
+    })
 
 
 @app.get("/api/tools")

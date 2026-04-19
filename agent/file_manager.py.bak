@@ -197,100 +197,30 @@ def write_file(filepath: str, content: str, force: bool = False) -> dict:
     except Exception as e: return _err(str(e), "ERROR")
 
 
-# ── BUFFER SYSTEM (in-memory, tidak menyentuh disk sampai flush) ─────────────
-_FILE_BUFFER: dict = {}
-
-# ── TOOL 4b: buffer_chunk ────────────────────────────────────────────────────
-def buffer_chunk(filepath: str, content: str) -> dict:
+# ── TOOL 4b: append_file ────────────────────────────────────────────────────
+def append_file(filepath: str, content: str) -> dict:
     """
-    Tambahkan chunk kode ke buffer MEMORI. TIDAK menyentuh disk sama sekali.
-    Kumpulkan semua bagian dulu, baru panggil flush_buffer() untuk simpan.
+    Tambahkan konten ke akhir file yang sudah ada (atau buat baru jika belum ada).
+    Gunakan tool ini untuk menulis file BESAR secara bertahap (chunk per chunk)
+    agar tidak terpotong karena context window limit.
 
-    WORKFLOW WAJIB untuk file besar:
-      Step 1: buffer_chunk(path, CHUNK_1)   <- kumpulkan bagian pertama
-      Step 2: buffer_chunk(path, CHUNK_2)   <- kumpulkan bagian berikutnya
-      Step N: buffer_chunk(path, CHUNK_N)   <- sampai SEMUA kode selesai
-      Akhir : flush_buffer(path)            <- baru simpan ke disk + validasi
-    JANGAN flush sebelum semua chunk terkumpul.
+    Workflow yang benar untuk file besar:
+      1. write_file(path, chunk_pertama)   ← tulis awal file (HTML head, dll)
+      2. append_file(path, chunk_kedua)    ← tambah bagian berikutnya
+      3. append_file(path, chunk_ketiga)   ← dst...
+      4. validate_file(path)               ← verifikasi hasil akhir
     """
     try:
-        _resolve(filepath)
-        if filepath not in _FILE_BUFFER:
-            _FILE_BUFFER[filepath] = []
-        _FILE_BUFFER[filepath].append(content)
-        total_chars  = sum(len(c) for c in _FILE_BUFFER[filepath])
-        total_chunks = len(_FILE_BUFFER[filepath])
-        return _ok({
-            "filepath":      filepath,
-            "chunks_so_far": total_chunks,
-            "total_chars":   total_chars,
-            "status":        "buffered — belum disimpan ke disk",
-            "next_step":     "Lanjut buffer_chunk() atau flush_buffer() kalau sudah selesai semua"
-        })
-    except Exception as e: return _err(str(e), "ERROR")
-
-
-# ── TOOL 4c: flush_buffer ────────────────────────────────────────────────────
-def flush_buffer(filepath: str) -> dict:
-    """
-    Gabungkan SEMUA chunk dari buffer lalu simpan ke disk sekaligus.
-    Otomatis validasi — jika tidak valid, DIBATALKAN, disk tidak tersentuh.
-    Panggil hanya setelah semua chunk sudah masuk via buffer_chunk().
-    """
-    try:
-        if filepath not in _FILE_BUFFER or not _FILE_BUFFER[filepath]:
-            return _err(f"Tidak ada buffer untuk '{filepath}'. Panggil buffer_chunk() dulu.", "BUFFER_EMPTY")
-        full_content = "".join(_FILE_BUFFER[filepath])
-        total_chunks = len(_FILE_BUFFER[filepath])
-        err_msg = _validate_content(filepath, full_content)
-        if err_msg:
-            return _err(
-                f"FLUSH DIBATALKAN — konten tidak valid: {err_msg} "
-                f"| chunks: {total_chunks} | chars: {len(full_content)} "
-                f"| Tambah chunk yang kurang lalu flush_buffer() ulang.",
-                "CONTENT_INVALID"
-            )
         target = _resolve(filepath)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(full_content, encoding="utf-8")
-        del _FILE_BUFFER[filepath]
+        with target.open("a", encoding="utf-8") as f:
+            f.write(content)
+        size = target.stat().st_size
         return _ok({
             "filepath":      str(target.relative_to(SANDBOX_ROOT)),
-            "bytes_written": target.stat().st_size,
-            "total_chunks":  total_chunks,
-            "validated":     True,
-            "status":        "File lengkap berhasil disimpan ke disk"
+            "total_bytes":   size,
+            "appended_bytes": len(content.encode("utf-8")),
         })
-    except Exception as e: return _err(str(e), "ERROR")
-
-
-# ── TOOL 4d: buffer_status ───────────────────────────────────────────────────
-def buffer_status(filepath: Optional[str] = None) -> dict:
-    """Cek isi buffer. Berguna untuk verifikasi sebelum flush."""
-    try:
-        if filepath:
-            chunks = _FILE_BUFFER.get(filepath, [])
-            return _ok({
-                "filepath":     filepath,
-                "chunks":       len(chunks),
-                "total_chars":  sum(len(c) for c in chunks),
-                "preview_start": chunks[0][:200] if chunks else "",
-                "preview_end":   chunks[-1][-200:] if chunks else "",
-            })
-        summary = {fp: {"chunks": len(cs), "total_chars": sum(len(c) for c in cs)} for fp, cs in _FILE_BUFFER.items()}
-        return _ok({"active_buffers": len(_FILE_BUFFER), "buffers": summary})
-    except Exception as e: return _err(str(e), "ERROR")
-
-
-# ── TOOL 4e: clear_buffer ────────────────────────────────────────────────────
-def clear_buffer(filepath: str) -> dict:
-    """Hapus buffer untuk filepath tertentu tanpa menyimpan ke disk."""
-    try:
-        if filepath in _FILE_BUFFER:
-            n = len(_FILE_BUFFER[filepath])
-            del _FILE_BUFFER[filepath]
-            return _ok({"filepath": filepath, "cleared_chunks": n})
-        return _ok({"filepath": filepath, "cleared_chunks": 0, "note": "Buffer memang kosong"})
     except Exception as e: return _err(str(e), "ERROR")
 
 
@@ -509,10 +439,7 @@ TOOL_MAP = {
     "list_files":             list_files,
     "read_file":              read_file,
     "write_file":             write_file,
-    "buffer_chunk":           buffer_chunk,
-    "flush_buffer":           flush_buffer,
-    "buffer_status":          buffer_status,
-    "clear_buffer":           clear_buffer,
+    "append_file":            append_file,
     "validate_file":          validate_file,
     "manage_zip":             manage_zip,
     "search_in_files":        search_in_files,

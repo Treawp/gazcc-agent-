@@ -509,47 +509,47 @@ RULE 1 — CEK UKURAN SEBELUM NULIS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Estimasi jumlah baris output sebelum mulai generate.
 
-- File < 300 baris  → boleh write_file sekaligus
-- File ≥ 300 baris  → WAJIB pakai metode chunk (lihat Rule 2)
+- File < 300 baris  → write_file() langsung, selesai
+- File ≥ 300 baris  → WAJIB pakai BUFFER SYSTEM (Rule 2)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-RULE 2 — METODE CHUNK UNTUK FILE BESAR
+RULE 2 — BUFFER SYSTEM UNTUK FILE BESAR (≥ 300 baris)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Untuk file ≥ 300 baris, ikuti urutan ini TANPA SKIP:
+Kumpulkan SEMUA kode di memori dulu, baru simpan ke disk sekaligus.
+File TIDAK akan menyentuh disk sampai flush_buffer() dipanggil.
 
-  Step 1: write_file(path, CHUNK_1)
-          → Chunk 1 = bagian paling awal file
-            (untuk HTML: mulai dari <!DOCTYPE> sampai akhir <style>)
+  Step 1: buffer_chunk(path, CHUNK_1)
+          → Chunk pertama (untuk HTML: <!DOCTYPE> sampai akhir <style>)
 
-  Step 2: append_file(path, CHUNK_2)
-          → Chunk 2 = bagian tengah
-            (untuk HTML: semua JS logic utama)
+  Step 2: buffer_chunk(path, CHUNK_2)
+          → Chunk berikutnya (JS logic, dll)
 
-  Step 3: append_file(path, CHUNK_N)
-          → Ulangi sampai seluruh konten selesai
-            (untuk HTML: pastikan chunk terakhir berisi </body></html>)
+  Step N: buffer_chunk(path, CHUNK_N)
+          → Terus sampai SELURUH kode selesai digenerate
+          → Untuk HTML: chunk terakhir WAJIB berisi </body></html>
 
-  Step 4: validate_file(path)
-          → CEK WAJIB. Tunggu response.
-          → Jika valid: true  → lanjut ke FINAL ANSWER
-          → Jika valid: false → JANGAN kirim FINAL ANSWER,
-                                perbaiki file dulu lalu validate ulang
+  Cek  : buffer_status(path)
+          → Pastikan total_chars masuk akal sebelum flush
+
+  Flush: flush_buffer(path)
+          → Gabungkan semua chunk → validasi → simpan ke disk
+          → Jika CONTENT_INVALID: tambah chunk yang kurang, flush ulang
+          → Jika sukses: lanjut ke FINAL ANSWER
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE 3 — LARANGAN KERAS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-❌ JANGAN kirim FINAL ANSWER sebelum validate_file return valid: true
-❌ JANGAN tulis file HTML tanpa <!DOCTYPE html> di baris pertama
-❌ JANGAN tulis file yang diawali potongan kode (misal: "{ id:", "};", "],")
-❌ JANGAN assume file sudah lengkap tanpa validate_file
+❌ JANGAN kirim FINAL ANSWER sebelum flush_buffer() return sukses
+❌ JANGAN write_file() untuk file besar — langsung kepotong
+❌ JANGAN tulis file HTML tanpa <!DOCTYPE html> di chunk pertama
+❌ JANGAN flush sebelum semua chunk selesai dikumpulkan
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 RULE 4 — FORMAT FINAL ANSWER SETELAH FILE SELESAI
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Setelah validate_file return valid: true, sertakan di FINAL ANSWER:
+Sertakan di FINAL ANSWER:
   - Nama file yang dibuat
   - Ukuran file (bytes / baris)
-  - Hasil validate_file (valid: true)
   - export_marker dari get_file_as_base64 agar user bisa download
 """
 

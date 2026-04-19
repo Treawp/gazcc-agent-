@@ -144,6 +144,7 @@ RULES:
 - Steps that can run in parallel MUST have empty depends_on
 - The final step must always produce or summarize the output
 - Use proactive_monitor tool early in the plan to catch missed steps
+- CRITICAL: ONLY use write_file/create_file if the user EXPLICITLY asked to create/save a file. If user is asking a question or for recommendations, NEVER plan file creation steps.
 - Respond ONLY with JSON — no markdown, no explanation
 """
 
@@ -178,7 +179,7 @@ class Planner:
         self._cfg = llm_cfg
         self._tool_schema = tool_schema
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "moonshotai/kimi-k2.5")
+        self._model = llm_cfg.get("model", "qwen/qwen3-235b-a22b:free")
         self._api_key = llm_cfg.get("api_key", "")
         self._memory_context = ""  # injected by agent from semantic memory
 

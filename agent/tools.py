@@ -1936,19 +1936,20 @@ class ClaudeReasonTool(BaseTool):
     """
     name = "claude_reason"
     description = (
-        "Deep reasoning pakai Claude AI (Opus-level quality) via OpenRouter. "
-        "Gunakan untuk task kompleks: arsitektur sistem, analisis mendalam, "
-        "keputusan teknis kritis, atau verifikasi output agent. "
-        "Input: pertanyaan atau deskripsi task yang butuh analisis tingkat tinggi."
+        "Deep reasoning pakai model gratis tier (DeepSeek R1 / Gemini) via OpenRouter — "
+        "kualitas tinggi tanpa biaya. Gunakan untuk task kompleks: arsitektur sistem, "
+        "analisis mendalam, keputusan teknis kritis, atau verifikasi output agent. "
+        "Input: pertanyaan atau deskripsi task yang butuh analisis tingkat tinggi. "
+        "Optional: tentukan model lain dengan parameter model=."
     )
-    parameters = "query: str, model: str = 'anthropic/claude-opus-4-5'"
+    parameters = "query: str, model: str = 'qwen/qwen3.5-flash-02-23'"
 
     def __init__(self, llm_cfg: dict):
         self._cfg = llm_cfg
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
         self._api_key = llm_cfg.get("api_key", "")
 
-    async def run(self, query: str, model: str = "anthropic/claude-opus-4-5") -> ToolResult:
+    async def run(self, query: str, model: str = "qwen/qwen3.5-flash-02-23") -> ToolResult:
         if not query.strip():
             return ToolResult(False, "Error: query kosong")
         if not self._api_key:

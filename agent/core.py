@@ -27,6 +27,7 @@ from .gazcc_tools_expansion import register_expansion_tools
 from .extra_tools import register_extra_tools
 from .github_tool import register_github_tools
 from .skill_tools import register_skill_tools
+from .python_ai_tools import register_python_ai_tools
 from .learning import LearningSystem
 
 logger = logging.getLogger("gazcc.agent")
@@ -121,6 +122,7 @@ class GazccAgent:
         register_extra_tools(self._tools, self._cfg)
         register_github_tools(self._tools, self._cfg)
         register_skill_tools(self._tools, self._cfg)
+        register_python_ai_tools(self._tools, self._cfg)
 
         self._planner = Planner(self._llm_cfg, self._tools.slim_schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)

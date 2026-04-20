@@ -27,6 +27,7 @@ from .gazcc_tools_expansion import register_expansion_tools
 from .extra_tools import register_extra_tools
 from .github_tool import register_github_tools
 from .skill_tools import register_skill_tools
+from .learning import LearningSystem
 
 logger = logging.getLogger("gazcc.agent")
 logging.basicConfig(
@@ -124,6 +125,7 @@ class GazccAgent:
         self._planner = Planner(self._llm_cfg, self._tools.slim_schema_string())
         self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)
         self._sem_mem = _sem_mem  # direct reference for pre-task memory recall
+        self._learning = LearningSystem(self._llm_cfg, self._memory)
 
         self._events: list[AgentEvent] = []
         self._event_callbacks: list[Callable[[AgentEvent], None]] = []
@@ -160,6 +162,9 @@ class GazccAgent:
             # ── 1. emit start ──────────────────────────────────────────────
             yield self._emit("task_start", {"task_id": task_id, "task": task})
 
+            # ── Init learning tracker for this task
+            _tracker = self._learning.start_task(task_id, task)
+
             # ── 2. check for existing checkpoint ──────────────────────────
             plan = await self._load_checkpoint(state_store, task)
             if plan:
@@ -174,6 +179,10 @@ class GazccAgent:
                     f"[{e.key}]: {e.content[:200]}" for e in mem_ctx
                 )
                 self._planner.set_memory_context(mem_ctx_text)
+
+                # Inject learning insights into planner
+                learning_ctx = await self._learning.get_insights_context()
+                self._planner.set_learning_context(learning_ctx)
 
                 plan = await asyncio.wait_for(
                     self._planner.decompose(task),
@@ -220,6 +229,7 @@ class GazccAgent:
                 # Execute ready steps (could be parallelized; serial for safety)
                 for step in ready:
                     step.status = "running"
+                    _tracker.step_started(step.id)
                     yield self._emit("step_start", {"step_id": step.id, "description": step.description, "tool_hint": step.tool_hint})
 
                     # Memory recall relevant to this step
@@ -274,6 +284,7 @@ class GazccAgent:
                             content=result_str,
                             metadata={"task_id": task_id, "step": step.description},
                         )
+                        _tracker.step_completed(step.id, step.description, step.tool_hint, success=True, retries=step.retries)
                         yield self._emit("step_done", {
                             "step_id": step.id,
                             "description": step.description,
@@ -283,6 +294,7 @@ class GazccAgent:
                         step.retries += 1
                         if step.retries >= self._retry_limit:
                             step.status = "failed"
+                            _tracker.step_completed(step.id, step.description, step.tool_hint, success=False, retries=step.retries, error=result_str)
                             yield self._emit("step_failed", {
                                 "step_id": step.id,
                                 "description": step.description,
@@ -308,6 +320,24 @@ class GazccAgent:
             final_output = self._compile_output(task, plan, context_parts)
 
             if plan.is_complete() and not plan.has_failed():
+                # ── EVALUASI: quality check output before declaring done ──
+                yield self._emit("evaluating", {"msg": "Evaluating output quality..."})
+                eval_result = await self._learning.finalize_task(
+                    _tracker,
+                    success=True,
+                    steps_done=len(done_steps),
+                    steps_total=len(plan.steps),
+                    elapsed_s=elapsed,
+                    output=final_output,
+                )
+                yield self._emit("evaluation_done", {
+                    "score": eval_result.get("score"),
+                    "goal_met": eval_result.get("goal_met"),
+                    "summary": eval_result.get("summary"),
+                    "retry_recommended": eval_result.get("retry_recommended", False),
+                    "weaknesses": eval_result.get("weaknesses", []),
+                })
+
                 # Store final output in memory
                 await self._memory.store(
                     key=f"{task_id}_final",
@@ -325,11 +355,21 @@ class GazccAgent:
                     "task_id": task_id,
                     "steps_done": len(done_steps),
                     "elapsed": round(elapsed, 2),
+                    "eval_score": eval_result.get("score"),
                     "output_preview": final_output[:400],
                 })
             else:
                 failed = [s for s in plan.steps if s.status == "failed"]
                 err_msg = f"{len(failed)} step(s) failed"
+                # Still finalize learning on failure
+                await self._learning.finalize_task(
+                    _tracker,
+                    success=False,
+                    steps_done=len(done_steps),
+                    steps_total=len(plan.steps),
+                    elapsed_s=elapsed,
+                    output=final_output,
+                )
                 self._last_result = AgentResult(
                     task_id=task_id, task=task, success=False,
                     output=final_output,

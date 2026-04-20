@@ -101,6 +101,9 @@ AVAILABLE TOOLS:
 PAST CONTEXT (user preferences & prior outcomes):
 {memory_context}
 
+LEARNING INSIGHTS (derived from past task outcomes):
+{learning_context}
+
 ══════════════════════════════════════════════════════
 PHASE 1 — PRE-MORTEM ANALYSIS (think before you plan)
 ══════════════════════════════════════════════════════
@@ -182,16 +185,22 @@ class Planner:
         self._model = llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
         self._api_key = llm_cfg.get("api_key", "")
         self._memory_context = ""  # injected by agent from semantic memory
+        self._learning_context = ""  # injected by agent from LearningSystem
 
     def set_memory_context(self, ctx: str):
         """Called by the agent to inject relevant past context before planning."""
         self._memory_context = ctx[:2000] if ctx else "(no prior context)"
+
+    def set_learning_context(self, ctx: str):
+        """Called by the agent to inject learning insights before planning."""
+        self._learning_context = ctx[:1500] if ctx else "(no learning insights yet)"
 
     async def decompose(self, task: str) -> Plan:
         prompt = PLAN_PROMPT.format(
             task=task,
             tools=self._tool_schema,
             memory_context=self._memory_context or "(no prior context)",
+            learning_context=self._learning_context or "(no learning insights yet)",
         )
         raw = await self._call_llm(prompt)
         return self._parse_plan(task, raw)

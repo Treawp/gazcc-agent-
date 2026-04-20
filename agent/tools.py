@@ -1854,6 +1854,146 @@ class CountStatsTool(BaseTool):
             return ToolResult(False, f"count_stats error: {e}")
 
 
+# ── deep_reason & claude_reason tools ────────────────────────────────────────
+
+DEEP_REASON_SYSTEM = """\
+Kamu adalah analytical engine yang SANGAT AKURAT dan grounded.
+Aturan MUTLAK:
+1. HANYA nyatakan hal yang kamu YAKIN benar — kalau ragu, katakan "Aku tidak yakin tentang X"
+2. JANGAN mengarang data, angka, statistik, atau fakta teknis
+3. Gunakan reasoning step-by-step yang eksplisit — tunjukkan alur pikir
+4. Pisahkan dengan jelas: [FACTS] vs [ASSUMPTIONS] vs [INFERENCES]
+5. Jika ada ambiguitas, nyatakan dan jawab untuk tiap interpretasi
+6. Lebih baik akui ketidaktahuan daripada mengarang jawaban yang terdengar meyakinkan
+
+Format output:
+[ANALYSIS] — pemahaman masalah
+[FACTS] — hal yang diketahui pasti
+[REASONING] — langkah-langkah logika
+[CONCLUSION] — jawaban akhir dengan confidence level (Low/Medium/High)
+"""
+
+
+class DeepReasonTool(BaseTool):
+    """
+    Grounded step-by-step reasoning tool — anti-hallucination.
+    Re-calls the configured LLM with a strict analytical system prompt
+    at very low temperature to minimize confabulation.
+    """
+    name = "deep_reason"
+    description = (
+        "Analisis mendalam & grounded — anti-halusinasi. "
+        "Gunakan sebelum menjawab hal teknis kompleks, klaim faktual, debugging, "
+        "atau saat confidence rendah. Input: pertanyaan atau klaim yang perlu diverifikasi."
+    )
+    parameters = "query: str"
+
+    def __init__(self, llm_cfg: dict):
+        self._cfg = llm_cfg
+        self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
+        self._model = llm_cfg.get("model", "qwen/qwen3-235b-a22b")
+        self._api_key = llm_cfg.get("api_key", "")
+
+    async def run(self, query: str) -> ToolResult:
+        if not query.strip():
+            return ToolResult(False, "Error: query kosong")
+        if not self._api_key:
+            return ToolResult(False, "Error: API key tidak ditemukan di config LLM")
+        try:
+            url = f"{self._base_url.rstrip('/')}/chat/completions"
+            payload = {
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": DEEP_REASON_SYSTEM},
+                    {"role": "user", "content": query},
+                ],
+                "max_tokens": 2000,
+                "temperature": 0.05,
+            }
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/gazcc",
+                "X-Title": "GazccDeepReason",
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                result = data["choices"][0]["message"]["content"]
+            return ToolResult(True, result, {"model": self._model, "mode": "deep_reason"})
+        except httpx.HTTPStatusError as e:
+            return ToolResult(False, f"HTTP {e.response.status_code}: {e.response.text[:300]}")
+        except Exception as e:
+            return ToolResult(False, f"DeepReasonTool error: {e}")
+
+
+class ClaudeReasonTool(BaseTool):
+    """
+    High-quality reasoning via Claude Opus (via OpenRouter).
+    Useful for complex architectural decisions, nuanced analysis,
+    or tasks requiring Claude-level accuracy and depth.
+    """
+    name = "claude_reason"
+    description = (
+        "Deep reasoning pakai Claude AI (Opus-level quality) via OpenRouter. "
+        "Gunakan untuk task kompleks: arsitektur sistem, analisis mendalam, "
+        "keputusan teknis kritis, atau verifikasi output agent. "
+        "Input: pertanyaan atau deskripsi task yang butuh analisis tingkat tinggi."
+    )
+    parameters = "query: str, model: str = 'anthropic/claude-opus-4-5'"
+
+    def __init__(self, llm_cfg: dict):
+        self._cfg = llm_cfg
+        self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
+        self._api_key = llm_cfg.get("api_key", "")
+
+    async def run(self, query: str, model: str = "anthropic/claude-opus-4-5") -> ToolResult:
+        if not query.strip():
+            return ToolResult(False, "Error: query kosong")
+        if not self._api_key:
+            return ToolResult(False, "Error: API key tidak ditemukan di config LLM")
+        try:
+            url = f"{self._base_url.rstrip('/')}/chat/completions"
+            payload = {
+                "model": model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are Claude, an AI assistant by Anthropic known for exceptional "
+                            "reasoning, honesty, and accuracy. Always think step by step. "
+                            "Never hallucinate facts. If uncertain, explicitly state your uncertainty. "
+                            "Provide thorough, nuanced, and practically actionable analysis."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                "max_tokens": 3000,
+                "temperature": 0.1,
+            }
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/gazcc",
+                "X-Title": "GazccClaudeReason",
+            }
+            async with httpx.AsyncClient(timeout=90) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 402:
+                    return ToolResult(False, "Error 402: Kredit OpenRouter habis. Top up di openrouter.ai/credits")
+                if resp.status_code == 401:
+                    return ToolResult(False, "Error 401: API key invalid atau tidak punya akses ke model ini")
+                resp.raise_for_status()
+                data = resp.json()
+                result = data["choices"][0]["message"]["content"]
+            return ToolResult(True, f"[Claude {model}]\n\n{result}", {"model": model, "mode": "claude_reason"})
+        except httpx.HTTPStatusError as e:
+            return ToolResult(False, f"HTTP {e.response.status_code}: {e.response.text[:300]}")
+        except Exception as e:
+            return ToolResult(False, f"ClaudeReasonTool error: {e}")
+
+
 # ── registry ──────────────────────────────────────────────────────────────────
 
 class ToolRegistry:
@@ -1865,6 +2005,11 @@ class ToolRegistry:
         for tool in [GetTimeTool(), CalculateTool(), SummarizeTextTool(),
                      CountStatsTool(), RandomGenTool(), DateCalcTool(), StringTransformTool()]:
             self._register(tool)
+
+        # ── Reasoning tools — always on
+        llm_cfg_resolved = cfg.get("llm", {})
+        self._register(DeepReasonTool(llm_cfg_resolved))
+        self._register(ClaudeReasonTool(llm_cfg_resolved))
 
         if enabled.get("file_ops", True):
             for tool in [

@@ -416,5 +416,83 @@
       },
       "required": ["url"]
     }
+  },
+  {
+    "name": "table_generator",
+    "description": "Generate perfectly formatted tables from headers + rows. Supports markdown, html, ascii/box, csv, tsv, json, rst. Handles column alignment (left/center/right), emoji-safe width, optional title, and file output.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "headers": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Column header names"
+        },
+        "rows": {
+          "type": "array",
+          "items": {"type": "array"},
+          "description": "2D array of row data. Each inner array = one row. Also accepts array-of-objects (keys auto-mapped to headers)."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["markdown", "ascii", "box", "html", "csv", "tsv", "json", "rst"],
+          "description": "Output format. Default: markdown"
+        },
+        "align": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["left", "center", "right"]},
+          "description": "Per-column alignment array. Length must match headers. Default: all left."
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional table title / caption"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Optional file path to save the rendered table"
+        }
+      },
+      "required": ["headers", "rows"]
+    }
+  },
+  {
+    "name": "zip_extract",
+    "description": "Extract a ZIP archive. Supports list-only, extract-all, extract specific files, pattern filter, password-protected ZIPs, and nested ZIP detection. Returns file tree with per-file metadata.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "zip_path": {
+          "type": "string",
+          "description": "Absolute or relative path to the .zip file"
+        },
+        "output_dir": {
+          "type": "string",
+          "description": "Destination directory. Defaults to <zip_name>/ next to the archive."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["list", "extract_all", "extract_files", "extract_pattern"],
+          "description": "list=manifest only (no extract); extract_all=everything; extract_files=specific names; extract_pattern=regex filter. Default: extract_all"
+        },
+        "files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Exact member names to extract (used when mode=extract_files)"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to filter members by filename (used when mode=extract_pattern)"
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for encrypted ZIPs (optional)"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "description": "Overwrite existing files. Default: true"
+        }
+      },
+      "required": ["zip_path"]
+    }
   }
 ]

@@ -806,6 +806,336 @@ class CacheCheckTool(BaseTool):
         except Exception as e: return ToolResult(False, f"cache_check error: {e}")
 
 
+class TableGeneratorTool(BaseTool):
+    name = "table_generator"
+    description = (
+        "Generate perfectly formatted tables from headers + rows data. "
+        "Supports: markdown, html, ascii/box, csv, tsv, json, rst (reStructuredText). "
+        "Handles column alignment (left/center/right), auto-width, emoji-safe padding, "
+        "optional title/caption, zebra rows (HTML), and output to file. "
+        "Returns the rendered table string plus metadata."
+    )
+    parameters = (
+        "headers: list, "
+        "rows: list, "
+        "format: str = 'markdown', "
+        "align: list = None, "
+        "title: str = None, "
+        "output_path: str = None"
+    )
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _vis_len(s: str) -> int:
+        """Visual length — strip ANSI, count CJK/emoji as 2 cols."""
+        import unicodedata, re as _re
+        s = _re.sub(r"\x1b\[[0-9;]*m", "", str(s))
+        w = 0
+        i = 0
+        while i < len(s):
+            cp = ord(s[i])
+            # surrogate pair check for emoji (common range)
+            if 0xD800 <= cp <= 0xDBFF and i + 1 < len(s):
+                low = ord(s[i + 1])
+                if 0xDC00 <= low <= 0xDFFF:
+                    code = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
+                    # emoji / symbols in supplementary planes → width 2
+                    w += 2; i += 2; continue
+            ea = unicodedata.east_asian_width(s[i])
+            w += 2 if ea in ("W", "F") else 1
+            i += 1
+        return w
+
+    @staticmethod
+    def _pad(text: str, width: int, align: str) -> str:
+        vl = TableGeneratorTool._vis_len(text)
+        pad = max(0, width - vl)
+        if align == "right":
+            return " " * pad + text
+        if align == "center":
+            l = pad // 2; r = pad - l
+            return " " * l + text + " " * r
+        return text + " " * pad  # left (default)
+
+    # ── renderers ──────────────────────────────────────────────────────────────
+    def _render_markdown(self, headers, rows, aligns, col_w):
+        P = self._pad
+        sep_parts = []
+        for i, w in enumerate(col_w):
+            a = aligns[i]
+            if a == "center": sep_parts.append(":" + "-" * (w) + ":")
+            elif a == "right": sep_parts.append("-" * (w + 1) + ":")
+            else: sep_parts.append("-" * (w + 2))
+        header_row = "| " + " | ".join(P(str(h), col_w[i], aligns[i]) for i, h in enumerate(headers)) + " |"
+        sep_row = "|" + "|".join(sep_parts) + "|"
+        data_rows = ["| " + " | ".join(P(str(c), col_w[i], aligns[i]) for i, c in enumerate(row)) + " |"
+                     for row in rows]
+        return "\n".join([header_row, sep_row] + data_rows)
+
+    def _render_ascii(self, headers, rows, aligns, col_w):
+        P = self._pad
+        border = "+" + "+".join("-" * (w + 2) for w in col_w) + "+"
+        def make_row(cells):
+            return "| " + " | ".join(P(str(c), col_w[i], aligns[i]) for i, c in enumerate(cells)) + " |"
+        sep = "+" + "+".join("=" * (w + 2) for w in col_w) + "+"
+        lines = [border, make_row(headers), sep]
+        for row in rows:
+            lines.append(make_row(row)); lines.append(border)
+        return "\n".join(lines)
+
+    def _render_html(self, headers, rows, aligns, title):
+        align_map = {"left": "left", "center": "center", "right": "right"}
+        th_cells = "".join(f'<th style="text-align:{align_map[aligns[i]]};padding:8px 12px;background:#2d2d2d;color:#fff">'
+                           f'{h}</th>' for i, h in enumerate(headers))
+        tr_rows = []
+        for ri, row in enumerate(rows):
+            bg = "#1a1a1a" if ri % 2 == 0 else "#242424"
+            tds = "".join(f'<td style="text-align:{align_map[aligns[i]]};padding:6px 12px">'
+                          f'{c}</td>' for i, c in enumerate(row))
+            tr_rows.append(f'<tr style="background:{bg}">{tds}</tr>')
+        cap = f'<caption style="font-weight:bold;margin-bottom:6px;color:#ccc">{title}</caption>' if title else ""
+        return (f'<table style="border-collapse:collapse;font-family:monospace;font-size:14px;width:100%">'
+                f'{cap}<thead><tr>{th_cells}</tr></thead><tbody>{"".join(tr_rows)}</tbody></table>')
+
+    def _render_rst(self, headers, rows, aligns, col_w):
+        P = self._pad
+        border = " ".join("=" * w for w in col_w)
+        header_row = " ".join(P(str(h), col_w[i], aligns[i]) for i, h in enumerate(headers))
+        data_rows = [" ".join(P(str(c), col_w[i], aligns[i]) for i, c in enumerate(row)) for row in rows]
+        return "\n".join([border, header_row, border] + data_rows + [border])
+
+    # ── main run ───────────────────────────────────────────────────────────────
+    async def run(
+        self,
+        headers: list,
+        rows: list,
+        format: str = "markdown",
+        align: list = None,
+        title: str = None,
+        output_path: str = None,
+    ) -> ToolResult:
+        import csv as _csv, json as _json, io as _io
+        try:
+            if not headers:
+                return ToolResult(False, "table_generator error: headers cannot be empty")
+
+            # ── normalise rows ─────────────────────────────────────────────
+            # accept list-of-dicts auto-extract
+            if rows and isinstance(rows[0], dict):
+                if not headers:
+                    headers = list(rows[0].keys())
+                rows = [[str(r.get(h, "")) for h in headers] for r in rows]
+            else:
+                rows = [[str(c) for c in row] for row in rows]
+
+            ncols = len(headers)
+            # pad short rows
+            rows = [row + [""] * max(0, ncols - len(row)) for row in rows]
+            # truncate extra cols
+            rows = [row[:ncols] for row in rows]
+
+            # ── alignments ────────────────────────────────────────────────
+            valid_aligns = {"left", "center", "right"}
+            if align and len(align) == ncols:
+                aligns = [a if a in valid_aligns else "left" for a in align]
+            else:
+                aligns = ["left"] * ncols
+
+            # ── column widths ─────────────────────────────────────────────
+            col_w = [max(self._vis_len(str(headers[i])),
+                         *(self._vis_len(row[i]) for row in rows) if rows else [0])
+                     for i in range(ncols)]
+
+            fmt = format.lower()
+
+            if fmt == "markdown":
+                table_str = self._render_markdown(headers, rows, aligns, col_w)
+                if title:
+                    table_str = f"**{title}**\n\n{table_str}"
+
+            elif fmt in ("ascii", "box"):
+                table_str = self._render_ascii(headers, rows, aligns, col_w)
+                if title:
+                    w = len(table_str.split("\n")[0])
+                    table_str = title.center(w) + "\n" + table_str
+
+            elif fmt == "html":
+                table_str = self._render_html(headers, rows, aligns, title)
+
+            elif fmt == "csv":
+                buf = _io.StringIO()
+                w = _csv.writer(buf)
+                w.writerow(headers)
+                w.writerows(rows)
+                table_str = buf.getvalue()
+
+            elif fmt == "tsv":
+                lines = ["\t".join(headers)] + ["\t".join(row) for row in rows]
+                table_str = "\n".join(lines)
+
+            elif fmt == "json":
+                data = [dict(zip(headers, row)) for row in rows]
+                table_str = _json.dumps(data, ensure_ascii=False, indent=2)
+
+            elif fmt == "rst":
+                table_str = self._render_rst(headers, rows, aligns, col_w)
+                if title:
+                    table_str = title + "\n" + "~" * len(title) + "\n\n" + table_str
+
+            else:
+                return ToolResult(False, f"table_generator error: unknown format '{format}'. "
+                                         "Use: markdown, ascii, html, csv, tsv, json, rst")
+
+            if output_path:
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(output_path).write_text(table_str, encoding="utf-8")
+
+            return ToolResult(True, _json.dumps({
+                "format": fmt,
+                "title": title,
+                "columns": ncols,
+                "rows": len(rows),
+                "output_path": output_path,
+                "table": table_str,
+            }, ensure_ascii=False))
+
+        except Exception as e:
+            return ToolResult(False, f"table_generator error: {e}")
+
+
+class ZipExtractTool(BaseTool):
+    name = "zip_extract"
+    description = (
+        "Extract a ZIP archive. Supports: list-only mode (no extraction), "
+        "extract all files, extract specific files by name/pattern, "
+        "password-protected ZIPs, and nested ZIP detection. "
+        "Returns file tree, total size, and per-file metadata."
+    )
+    parameters = (
+        "zip_path: str, "
+        "output_dir: str = None, "
+        "mode: str = 'extract_all', "
+        "files: list = None, "
+        "pattern: str = None, "
+        "password: str = None, "
+        "overwrite: bool = True"
+    )
+
+    async def run(
+        self,
+        zip_path: str,
+        output_dir: str = None,
+        mode: str = "extract_all",
+        files: list = None,
+        pattern: str = None,
+        password: str = None,
+        overwrite: bool = True,
+    ) -> ToolResult:
+        import zipfile, os, re as _re, json as _json
+        from pathlib import Path
+        from datetime import datetime
+
+        try:
+            zp = Path(zip_path)
+            if not zp.exists():
+                return ToolResult(False, f"zip_extract error: file not found → {zip_path}")
+            if not zipfile.is_zipfile(zp):
+                return ToolResult(False, f"zip_extract error: not a valid ZIP → {zip_path}")
+
+            pwd = password.encode() if password else None
+
+            with zipfile.ZipFile(zp, "r") as zf:
+                members = zf.infolist()
+
+                # ── build manifest ──────────────────────────────────────────
+                manifest = []
+                total_compressed = total_uncompressed = 0
+                nested_zips = []
+                for m in members:
+                    entry = {
+                        "name": m.filename,
+                        "compressed_size": m.compress_size,
+                        "uncompressed_size": m.file_size,
+                        "is_dir": m.is_dir(),
+                        "modified": datetime(*m.date_time).isoformat(),
+                        "compress_type": m.compress_type,
+                        "is_encrypted": bool(m.flag_bits & 0x1),
+                    }
+                    manifest.append(entry)
+                    total_compressed += m.compress_size
+                    total_uncompressed += m.file_size
+                    if not m.is_dir() and m.filename.lower().endswith(".zip"):
+                        nested_zips.append(m.filename)
+
+                if mode == "list":
+                    return ToolResult(True, _json.dumps({
+                        "mode": "list",
+                        "zip_path": str(zp),
+                        "total_files": sum(1 for m in manifest if not m["is_dir"]),
+                        "total_dirs": sum(1 for m in manifest if m["is_dir"]),
+                        "total_compressed_kb": round(total_compressed / 1024, 2),
+                        "total_uncompressed_kb": round(total_uncompressed / 1024, 2),
+                        "nested_zips": nested_zips,
+                        "members": manifest,
+                    }))
+
+                # ── resolve output directory ────────────────────────────────
+                out = Path(output_dir) if output_dir else zp.parent / zp.stem
+                out.mkdir(parents=True, exist_ok=True)
+
+                # ── filter targets ──────────────────────────────────────────
+                targets = members
+                if mode == "extract_files" and files:
+                    names_set = set(files)
+                    targets = [m for m in members if m.filename in names_set]
+                elif mode == "extract_pattern" and pattern:
+                    rx = _re.compile(pattern)
+                    targets = [m for m in members if rx.search(m.filename)]
+
+                extracted, skipped, errors = [], [], []
+                for m in targets:
+                    dest = out / m.filename
+                    if not overwrite and dest.exists() and not m.is_dir():
+                        skipped.append(m.filename)
+                        continue
+                    try:
+                        # path-traversal guard
+                        resolved = dest.resolve()
+                        if not str(resolved).startswith(str(out.resolve())):
+                            errors.append({"file": m.filename, "error": "path traversal blocked"})
+                            continue
+                        zf.extract(m, path=out, pwd=pwd)
+                        if not m.is_dir():
+                            extracted.append({
+                                "name": m.filename,
+                                "path": str(dest),
+                                "size_kb": round(m.file_size / 1024, 2),
+                            })
+                    except RuntimeError as e:
+                        errors.append({"file": m.filename, "error": str(e)})
+                    except Exception as e:
+                        errors.append({"file": m.filename, "error": str(e)})
+
+            return ToolResult(True, _json.dumps({
+                "mode": mode,
+                "zip_path": str(zp),
+                "output_dir": str(out),
+                "extracted_count": len(extracted),
+                "skipped_count": len(skipped),
+                "error_count": len(errors),
+                "total_uncompressed_kb": round(total_uncompressed / 1024, 2),
+                "nested_zips": nested_zips,
+                "extracted": extracted,
+                "skipped": skipped,
+                "errors": errors,
+            }))
+
+        except zipfile.BadZipFile as e:
+            return ToolResult(False, f"zip_extract error: corrupt/bad ZIP → {e}")
+        except Exception as e:
+            return ToolResult(False, f"zip_extract error: {e}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # REGISTRATION
 # ══════════════════════════════════════════════════════════════════════════════
@@ -818,12 +1148,13 @@ PYTHON_AI_TOOLS = [
     RpgGeneratorTool, DiceRollerTool, RandomQuestGenerateTool, PartyPlannerTool,
     QuizGenerateTool, FlashcardGenerateTool, SummaryGenerateTool, ConceptMapGenerateTool,
     LoadTestTool, LogAnalyzerTool, DbBackupTool, CacheCheckTool,
+    ZipExtractTool, TableGeneratorTool,
 ]
 
 
 def register_python_ai_tools(registry, cfg: dict | None = None) -> None:
     """
-    Register all 32 Python AI Tools into an existing ToolRegistry instance.
+    Register all 34 Python AI Tools into an existing ToolRegistry instance.
 
     USAGE in agent/core.py:
         from .python_ai_tools import register_python_ai_tools

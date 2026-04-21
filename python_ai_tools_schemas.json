@@ -1,0 +1,498 @@
+[
+  {
+    "name": "excel_parse",
+    "description": "Parse an Excel (.xlsx/.xls) file. Returns data rows, sheet names, column stats, and any errors.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {"type": "string", "description": "Path to the Excel file"},
+        "sheet_name": {"type": "string", "description": "Sheet name to read (optional, defaults to first sheet)"},
+        "clean_data": {"type": "boolean", "description": "Remove null rows and duplicates (default: true)"}
+      },
+      "required": ["file_path"]
+    }
+  },
+  {
+    "name": "api_test",
+    "description": "Test an HTTP API endpoint. Returns status_code, response body, headers, and response time in ms.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "API endpoint URL"},
+        "method": {"type": "string", "enum": ["GET","POST","PUT","DELETE","PATCH"], "description": "HTTP method (default: GET)"},
+        "headers": {"type": "object", "description": "Request headers as key-value dict"},
+        "body": {"type": "object", "description": "Request body as JSON object"},
+        "timeout": {"type": "integer", "description": "Timeout in seconds (default: 30)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "pdf_merge",
+    "description": "Merge multiple PDF files into one output file.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_paths": {"type": "array", "items": {"type": "string"}, "description": "List of PDF file paths to merge"},
+        "output_path": {"type": "string", "description": "Output path for merged PDF (default: merged.pdf)"}
+      },
+      "required": ["file_paths"]
+    }
+  },
+  {
+    "name": "qr_code_generate",
+    "description": "Generate a QR code image from any text or URL. Returns output image path.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "Text or URL to encode in QR code"},
+        "size": {"type": "integer", "description": "Image size in pixels (default: 300)"},
+        "color": {"type": "string", "description": "QR code color (default: black)"},
+        "bg": {"type": "string", "description": "Background color (default: white)"},
+        "output_path": {"type": "string", "description": "Output image path (default: qrcode.png)"}
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "prompt_optimize",
+    "description": "Optimize a prompt for better clarity, detail, or a specific goal. Uses heuristics.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "base_prompt": {"type": "string", "description": "The original prompt to optimize"},
+        "goal": {"type": "string", "enum": ["better_clarity","more_detailed","more_concise","technical","creative","step_by_step"], "description": "Optimization goal (default: better_clarity)"},
+        "context": {"type": "object", "description": "Optional context dict for the optimization"}
+      },
+      "required": ["base_prompt"]
+    }
+  },
+  {
+    "name": "json_schema_generate",
+    "description": "Auto-generate a JSON Schema from a sample JSON string or dict. Saves to file if path given.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "data_sample": {"type": "string", "description": "JSON string or dict to infer schema from"},
+        "output_path": {"type": "string", "description": "Path to save schema.json (optional)"}
+      },
+      "required": ["data_sample"]
+    }
+  },
+  {
+    "name": "data_clean",
+    "description": "Clean a JSON data list/dict: remove nulls, deduplicate, strip special chars. Returns cleaned data and report.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "data": {"type": "string", "description": "JSON string of the data to clean"},
+        "remove_nulls": {"type": "boolean", "description": "Remove null/empty values (default: true)"},
+        "remove_duplicates": {"type": "boolean", "description": "Remove duplicate records (default: true)"},
+        "remove_special": {"type": "boolean", "description": "Strip special characters from strings (default: true)"}
+      },
+      "required": ["data"]
+    }
+  },
+  {
+    "name": "data_viz_chart",
+    "description": "Generate a chart image (bar/line/pie/scatter) from labels and values. Saves PNG to output_path.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "data_type": {"type": "string", "enum": ["bar","line","pie","scatter"], "description": "Chart type"},
+        "labels": {"type": "array", "items": {"type": "string"}, "description": "X-axis labels or category names"},
+        "values": {"type": "array", "items": {"type": "number"}, "description": "Numeric values for each label"},
+        "title": {"type": "string", "description": "Chart title (default: Chart)"},
+        "output_path": {"type": "string", "description": "Output image path (default: chart.png)"}
+      },
+      "required": ["data_type", "labels", "values"]
+    }
+  },
+  {
+    "name": "csv_transform",
+    "description": "Convert a CSV file to JSON, Excel, or SQL INSERT statements. Returns output file path.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "input_path": {"type": "string", "description": "Path to the input CSV file"},
+        "output_format": {"type": "string", "enum": ["json","excel","sql","csv"], "description": "Output format (default: json)"},
+        "output_path": {"type": "string", "description": "Output file path (optional, auto-generated if omitted)"}
+      },
+      "required": ["input_path"]
+    }
+  },
+  {
+    "name": "sql_generator",
+    "description": "Generate SQL queries from natural language descriptions with a schema context.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "natural_query": {"type": "string", "description": "Plain English description of the desired query"},
+        "db_schema": {"type": "string", "description": "JSON schema dict or string describing tables and columns"},
+        "output_path": {"type": "string", "description": "Path to save .sql file (optional)"}
+      },
+      "required": ["natural_query", "db_schema"]
+    }
+  },
+  {
+    "name": "password_generate",
+    "description": "Generate a cryptographically secure password with configurable complexity.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "length": {"type": "integer", "description": "Password length (default: 16, max: 256)"},
+        "use_special": {"type": "boolean", "description": "Include special characters (default: true)"},
+        "use_numbers": {"type": "boolean", "description": "Include numbers (default: true)"},
+        "use_upper": {"type": "boolean", "description": "Include uppercase letters (default: true)"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "hash_verify",
+    "description": "Hash a password or verify it against a stored hash. Supports bcrypt, sha256, sha512, md5.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "password": {"type": "string", "description": "The plaintext password"},
+        "hash_string": {"type": "string", "description": "The stored hash to verify against (omit to generate hash)"},
+        "algorithm": {"type": "string", "enum": ["bcrypt","sha256","sha512","md5"], "description": "Hash algorithm (default: sha256)"},
+        "mode": {"type": "string", "enum": ["verify","hash"], "description": "Mode: verify or hash (default: verify)"}
+      },
+      "required": ["password"]
+    }
+  },
+  {
+    "name": "jwt_decode",
+    "description": "Decode a JWT token. Returns header, payload, expiry status, and signature validity.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "token": {"type": "string", "description": "JWT token string (eyJ...)"},
+        "secret_key": {"type": "string", "description": "Secret key for signature verification (optional)"},
+        "verify": {"type": "boolean", "description": "Whether to verify the signature (default: true)"}
+      },
+      "required": ["token"]
+    }
+  },
+  {
+    "name": "ssl_check",
+    "description": "Check SSL/TLS certificate for a domain: expiry date, issuer, validity.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "domain": {"type": "string", "description": "Domain name to check (e.g. google.com or https://google.com)"},
+        "check_expiry": {"type": "boolean", "description": "Check certificate expiry (default: true)"},
+        "check_chain": {"type": "boolean", "description": "Check certificate chain (default: true)"}
+      },
+      "required": ["domain"]
+    }
+  },
+  {
+    "name": "api_key_generate",
+    "description": "Generate a secure API key. Supports uuid, secret (hex), or random (alphanumeric) types.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "key_type": {"type": "string", "enum": ["uuid","secret","random"], "description": "Key generation algorithm (default: uuid)"},
+        "length": {"type": "integer", "description": "Key body length in chars (default: 32)"},
+        "prefix": {"type": "string", "description": "Key prefix string (default: APIKEY_)"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "sitemap_parse",
+    "description": "Fetch and parse a sitemap.xml URL. Returns list of URLs with metadata. Handles sitemap indexes.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "URL to the sitemap.xml file"},
+        "output_format": {"type": "string", "enum": ["json","list"], "description": "Output format (default: json)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "webhook_test",
+    "description": "Send a test payload to a webhook URL. Returns response status, body, and round-trip time.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "Webhook URL to send to"},
+        "payload": {"type": "object", "description": "JSON payload to send"},
+        "method": {"type": "string", "enum": ["POST","GET","PUT"], "description": "HTTP method (default: POST)"},
+        "headers": {"type": "object", "description": "Additional headers (optional)"}
+      },
+      "required": ["url", "payload"]
+    }
+  },
+  {
+    "name": "seo_audit",
+    "description": "SEO audit a URL: checks title, meta tags, headings, links, image alts, and load time.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "URL to audit"},
+        "depth": {"type": "integer", "description": "Crawl depth (default: 1)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "og_preview",
+    "description": "Extract Open Graph metadata from a URL for social media preview card.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "URL to extract OG tags from"},
+        "output_path": {"type": "string", "description": "Path to save HTML preview file (optional)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "link_checker",
+    "description": "Crawl a URL and check all linked pages for broken links (4xx/5xx). Returns broken links and summary.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "Base URL to crawl"},
+        "timeout": {"type": "integer", "description": "Per-request timeout in seconds (default: 10)"},
+        "max_depth": {"type": "integer", "description": "Crawl depth limit (default: 2)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "rpg_generator",
+    "description": "Generate a random RPG character with stats, skills, equipment, HP, and XP.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "character_class": {"type": "string", "description": "Character class: warrior, mage, rogue, ranger, paladin"},
+        "level": {"type": "integer", "description": "Character level 1-100 (default: 1)"},
+        "randomize": {"type": "boolean", "description": "Randomize stats (default: true)"}
+      },
+      "required": ["character_class"]
+    }
+  },
+  {
+    "name": "dice_roller",
+    "description": "Roll tabletop RPG dice. Supports d4/d6/d8/d10/d12/d20/d100. Multiple dice + modifier.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "dice_type": {"type": "string", "enum": ["d4","d6","d8","d10","d12","d20","d100"], "description": "Dice type (default: d20)"},
+        "count": {"type": "integer", "description": "Number of dice to roll (default: 1)"},
+        "modifier": {"type": "integer", "description": "Flat modifier added to total (default: 0)"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "random_quest_generate",
+    "description": "Generate a random RPG quest with title, description, enemies, rewards, and challenges.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "difficulty": {"type": "string", "enum": ["easy","medium","hard"], "description": "Quest difficulty (default: medium)"},
+        "theme": {"type": "string", "description": "Quest theme: fantasy or sci-fi (default: fantasy)"}
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "party_planner_guests",
+    "description": "Generate a party planning checklist with budget breakdown for N guests.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "count": {"type": "integer", "description": "Number of guests"},
+        "budget": {"type": "integer", "description": "Total budget in smallest currency unit (default: 1000000)"},
+        "theme": {"type": "string", "description": "Party theme: casual, formal, birthday, wedding (default: casual)"}
+      },
+      "required": ["count"]
+    }
+  },
+  {
+    "name": "quiz_generate_from_text",
+    "description": "Generate quiz questions from a text block. Supports multiple_choice, true_false, open formats.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "Source text to generate questions from"},
+        "question_count": {"type": "integer", "description": "Number of questions to generate (default: 5)"},
+        "format": {"type": "string", "enum": ["multiple_choice","true_false","open"], "description": "Question format (default: multiple_choice)"}
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "flashcard_generate",
+    "description": "Generate study flashcards from text. Each card has front (term) and back (definition). Saves to JSON.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "Source text to extract flashcards from"},
+        "cards_per_page": {"type": "integer", "description": "Cards per page/group (default: 5)"},
+        "output_path": {"type": "string", "description": "Output JSON path (default: flashcards.json)"}
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "summary_generate",
+    "description": "Summarize a long text using extractive summarization. Styles: concise, detailed, bullet.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "Text to summarize"},
+        "max_length": {"type": "integer", "description": "Max summary length in chars (default: 500)"},
+        "style": {"type": "string", "enum": ["concise","detailed","bullet"], "description": "Summary style (default: concise)"}
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "concept_map_generate",
+    "description": "Generate a concept map JSON from text — extracts key concepts and relationships for visualization.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "text": {"type": "string", "description": "Source text to build concept map from"},
+        "output_path": {"type": "string", "description": "Output JSON path (optional)"}
+      },
+      "required": ["text"]
+    }
+  },
+  {
+    "name": "load_test",
+    "description": "Lightweight HTTP load test with concurrent requests. Returns avg/min/max time, errors, throughput.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "URL to load test"},
+        "concurrent_users": {"type": "integer", "description": "Number of concurrent requests (default: 10, max: 50)"},
+        "duration": {"type": "integer", "description": "Test duration in seconds (default: 10, max: 60)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "log_analyzer",
+    "description": "Analyze a log file: extract error patterns, top errors, frequency stats, and recommendations.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_path": {"type": "string", "description": "Path to the log file"},
+        "error_patterns": {"type": "array", "items": {"type": "string"}, "description": "Custom regex patterns to match (optional)"}
+      },
+      "required": ["file_path"]
+    }
+  },
+  {
+    "name": "db_backup",
+    "description": "Backup a SQLite database to a .sql dump file with all tables and INSERT statements.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "db_path": {"type": "string", "description": "Path to the SQLite database file"},
+        "backup_path": {"type": "string", "description": "Output SQL file path (default: backup.sql)"},
+        "schedule": {"type": "object", "description": "Optional schedule metadata dict"}
+      },
+      "required": ["db_path"]
+    }
+  },
+  {
+    "name": "cache_check",
+    "description": "Check HTTP cache headers for a URL: Cache-Control, ETag, TTL, CDN status, cache score.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {"type": "string", "description": "URL to check cache headers on"},
+        "check_headers": {"type": "boolean", "description": "Include all response headers (default: true)"},
+        "check_ttl": {"type": "boolean", "description": "Parse and return TTL (default: true)"}
+      },
+      "required": ["url"]
+    }
+  },
+  {
+    "name": "table_generator",
+    "description": "Generate perfectly formatted tables from headers + rows. Supports markdown, html, ascii/box, csv, tsv, json, rst. Handles column alignment (left/center/right), emoji-safe width, optional title, and file output.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "headers": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Column header names"
+        },
+        "rows": {
+          "type": "array",
+          "items": {"type": "array"},
+          "description": "2D array of row data. Each inner array = one row. Also accepts array-of-objects (keys auto-mapped to headers)."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["markdown", "ascii", "box", "html", "csv", "tsv", "json", "rst"],
+          "description": "Output format. Default: markdown"
+        },
+        "align": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["left", "center", "right"]},
+          "description": "Per-column alignment array. Length must match headers. Default: all left."
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional table title / caption"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Optional file path to save the rendered table"
+        }
+      },
+      "required": ["headers", "rows"]
+    }
+  },
+  {
+    "name": "zip_extract",
+    "description": "Extract a ZIP archive. Supports list-only, extract-all, extract specific files, pattern filter, password-protected ZIPs, and nested ZIP detection. Returns file tree with per-file metadata.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "zip_path": {
+          "type": "string",
+          "description": "Absolute or relative path to the .zip file"
+        },
+        "output_dir": {
+          "type": "string",
+          "description": "Destination directory. Defaults to <zip_name>/ next to the archive."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["list", "extract_all", "extract_files", "extract_pattern"],
+          "description": "list=manifest only (no extract); extract_all=everything; extract_files=specific names; extract_pattern=regex filter. Default: extract_all"
+        },
+        "files": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Exact member names to extract (used when mode=extract_files)"
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Regex pattern to filter members by filename (used when mode=extract_pattern)"
+        },
+        "password": {
+          "type": "string",
+          "description": "Password for encrypted ZIPs (optional)"
+        },
+        "overwrite": {
+          "type": "boolean",
+          "description": "Overwrite existing files. Default: true"
+        }
+      },
+      "required": ["zip_path"]
+    }
+  }
+]

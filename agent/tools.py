@@ -68,7 +68,10 @@ class ReadFileTool(BaseTool):
 
 class WriteFileTool(BaseTool):
     name = "write_file"
-    description = "Write content to a file. Creates parent dirs if needed."
+    description = (
+        "Write content to a file. Creates parent dirs if needed. "
+        "After writing, call export_file_base64 with the same path to generate a downloadable [FILE_EXPORT:...] marker for the user."
+    )
     parameters = "path: str, content: str"
 
     async def run(self, path: str, content: str) -> ToolResult:

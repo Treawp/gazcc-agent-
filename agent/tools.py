@@ -2103,7 +2103,7 @@ class ToolRegistry:
             core_tools: tools always included regardless of hint
         """
         _core = set(core_tools or ["web_search", "fetch_url", "write_file", "read_file",
-                                    "run_code", "shell", "mem_search", "mem_store"])
+                                    "export_file_base64", "run_code", "shell", "mem_search", "mem_store"])
         target = set(tool_hints) | _core
         lines = []
         # First: hinted tools (full desc)

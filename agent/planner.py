@@ -147,7 +147,8 @@ RULES:
 - Steps that can run in parallel MUST have empty depends_on
 - The final step must always produce or summarize the output
 - Use proactive_monitor tool early in the plan to catch missed steps
-- CRITICAL: ONLY use write_file/create_file if the user EXPLICITLY asked to create/save a file. If user is asking a question or for recommendations, NEVER plan file creation steps.
+- CRITICAL: ONLY use write_file if the user EXPLICITLY asked to create/save/download a file. If user is asking a question or for recommendations, NEVER plan file creation steps.
+- For file creation tasks, plan TWO steps: first tool_hint="write_file", then tool_hint="export_file_base64"
 - Respond ONLY with JSON — no markdown, no explanation
 """
 

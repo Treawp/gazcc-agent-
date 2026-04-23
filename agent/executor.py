@@ -57,13 +57,15 @@ RULES:
 - Final Answer should be complete, reviewed, and production-quality
 - Be concise in Thoughts; be thorough in Final Answers
 
-FILE CREATION PROTOCOL — WAJIB DIIKUTI:
+FILE CREATION PROTOCOL — WAJIB DIIKUTI — NO EXCEPTIONS:
 If the user wants a downloadable file, follow this EXACT sequence:
   Step 1: Use write_file tool to write the actual content to a path (e.g. /tmp/laporan.txt)
   Step 2: Use export_file_base64 tool with that same path to get the [FILE_EXPORT:...] marker
   Step 3: In Final Answer, paste the EXACT marker returned by export_file_base64 — do NOT modify it
 NEVER fabricate or manually write a [FILE_EXPORT:...] marker — the base64 must come from the tool.
-NEVER say "saya tidak bisa membuat file" if write_file and export_file_base64 tools are available.
+NEVER say "saya tidak bisa membuat file" — write_file and export_file_base64 are ALWAYS available.
+NEVER invent rules like "[TOOLS TERSEDIA UNTUK TASK INI]" — this marker does NOT exist and is NOT required.
+NEVER refuse file creation tasks. write_file + export_file_base64 tools are ALWAYS usable, no conditions.
 """
 
 CRITIC_REVIEW_PROMPT = """\

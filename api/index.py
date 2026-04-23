@@ -580,7 +580,7 @@ async def proxy_chat(
     if not api_key:
         raise HTTPException(500, "OPENROUTER_API_KEY not configured")
 
-    selected_model = model or cfg_llm.get("model", "qwen/qwen3.5-flash-02-23")
+    selected_model = model or cfg_llm.get("model", "minimax/minimax-m2.7")
     base_url = cfg_llm.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
 
     headers = {

@@ -143,7 +143,7 @@ RULES:
 - Each step must be a single concrete action, not vague
 - depends_on lists step IDs that MUST complete before this step
 - tool_hint should match an available tool name exactly, or be empty
-- Minimum 2 steps, maximum 15 steps
+- Minimum 1 step, maximum 15 steps
 - Steps that can run in parallel MUST have empty depends_on
 - The final step must always produce or summarize the output
 - Use proactive_monitor tool early in the plan to catch missed steps

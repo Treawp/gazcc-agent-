@@ -702,7 +702,7 @@ class GodTierPlanner:
         self._evolution      = evolution
         self._memory_context = ""
         self._base_url       = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model          = llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
+        self._model          = llm_cfg.get("model", "minimax/minimax-m2.7")
         self._api_key        = llm_cfg.get("api_key", "")
 
         # Extract tool names from schema for planner hints
@@ -915,7 +915,7 @@ class GodTierExecutor:
         self._retry_limit = retry_limit
         self._evolution   = evolution
         self._base_url    = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model       = llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
+        self._model       = llm_cfg.get("model", "minimax/minimax-m2.7")
         self._api_key     = llm_cfg.get("api_key", "")
 
     async def execute_step(

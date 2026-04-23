@@ -1339,7 +1339,7 @@ class CodeTranslatorTool(BaseTool):
             )
 
             payload = {
-                "model":       "qwen/qwen3.5-flash-02-23",
+                "model":       "minimax/minimax-m2.7",
                 "max_tokens":  4000,
                 "temperature": 0.1,
                 "messages": [

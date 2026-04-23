@@ -71,7 +71,7 @@ class _LLMToolBase(BaseTool):
         # Bisa override model khusus skill tools via config
         self._model = (
             tool_cfg.get("skill_tools_model", "")
-            or llm.get("model", "qwen/qwen3-235b-a22b")
+            or llm.get("model", "minimax/minimax-m2.7")
         )
 
     async def _llm(

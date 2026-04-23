@@ -1,15 +1,15 @@
 llm:
   provider: openrouter
   base_url: https://openrouter.ai/api/v1
-  model: minimax/minimax-m2.7
+  model: x-ai/grok-4.1-fast
   api_key: ${OPENROUTER_API_KEY}
   max_tokens: 4000
   temperature: 0.1
 
 agent:
   name: GazccThinking
-  max_iterations: 20
-  timeout: 900
+  max_iterations: 12
+  timeout: 300
   checkpoint_interval: 3
   retry_limit: 3
   retry_delay: 2.0

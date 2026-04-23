@@ -14,6 +14,7 @@ import httpx
 
 from .planner import Step
 from .tools import ToolRegistry, ToolResult
+from .fact_guard import FactGuardInterceptor
 
 
 
@@ -137,13 +138,14 @@ class StepExecutor:
     MAX_CONTEXT_CHARS = 3000   # truncate step context from previous steps
     MAX_MEMORY_CHARS = 1200    # truncate memory recall
 
-    def __init__(self, llm_cfg: dict, tools: ToolRegistry, retry_limit: int = 3):
+    def __init__(self, llm_cfg: dict, tools: ToolRegistry, retry_limit: int = 3, agent_cfg: dict | None = None):
         self._cfg = llm_cfg
         self._tools = tools
         self._retry_limit = retry_limit
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
         self._model = llm_cfg.get("model", "qwen/qwen3.5-flash-02-23")
         self._api_key = llm_cfg.get("api_key", "")
+        self._fact_guard = FactGuardInterceptor(agent_cfg or {})
 
     def _build_system(self, step_tool_hint: str = "") -> str:
         """
@@ -219,7 +221,9 @@ class StepExecutor:
 
             # ── Final Answer ──────────────────────────────────────────────────
             if parsed["final_answer"] is not None:
-                return True, parsed["final_answer"]
+                answer = parsed["final_answer"]
+                answer = await self._fact_guard.process(answer)  # ← FACT GUARD
+                return True, answer
 
             # ── Tool call ─────────────────────────────────────────────────────
             action = parsed.get("action")

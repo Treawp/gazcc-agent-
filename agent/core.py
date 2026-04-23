@@ -28,6 +28,8 @@ from .extra_tools import register_extra_tools
 from .github_tool import register_github_tools
 from .skill_tools import register_skill_tools
 from .python_ai_tools import register_python_ai_tools
+from .new_tools import register_new_tools
+from .fact_guard import register_fact_guard, FactGuardInterceptor
 from .learning import LearningSystem
 
 logger = logging.getLogger("gazcc.agent")
@@ -123,9 +125,13 @@ class GazccAgent:
         register_github_tools(self._tools, self._cfg)
         register_skill_tools(self._tools, self._cfg)
         register_python_ai_tools(self._tools, self._cfg)
+        register_new_tools(self._tools, self._cfg)
+        register_fact_guard(self._tools, self._cfg)
+
+        self._fact_guard = FactGuardInterceptor(self._cfg)
 
         self._planner = Planner(self._llm_cfg, self._tools.slim_schema_string())
-        self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit)
+        self._executor = StepExecutor(self._llm_cfg, self._tools, self._retry_limit, agent_cfg=self._cfg)
         self._sem_mem = _sem_mem  # direct reference for pre-task memory recall
         self._learning = LearningSystem(self._llm_cfg, self._memory)
 
@@ -320,6 +326,7 @@ class GazccAgent:
             elapsed = time.time() - start
             done_steps = [s for s in plan.steps if s.status == "done"]
             final_output = self._compile_output(task, plan, context_parts)
+            final_output = await self._fact_guard.process(final_output)  # ← FACT GUARD
 
             if plan.is_complete() and not plan.has_failed():
                 # ── EVALUASI: quality check output before declaring done ──

@@ -31,6 +31,12 @@ tools:
   github_token: ""    # opsional — isi untuk rate limit 5000/hr vs 60/hr tanpa token
   skill_tools: true     # grill_me, frontend_design, theme_factory, browser_use, trailofbits_security, skill_creator, superpowers_skills
   skill_tools_model: "" # override model untuk skill tools (kosong = pakai model utama)   # SQLite, DataViz, TokenCounter, Screenshot, Whois, DNS, URLMeta, MD2HTML, HTML2MD, OCR, ImageResize, Git, Weather, CronScheduler
+  rss_reader: true         # fetch & parse RSS/Atom feeds
+  embedding_compare: true  # semantic similarity via OpenRouter embeddings
+  fact_guard_enabled: true         # auto anti-hallucination interceptor
+  fact_guard_min_length: 80        # skip teks < N chars (jawaban pendek)
+  fact_guard_auto_verify: false    # auto web-search HIGH-risk klaim (lebih lambat, tapi akurat)
+  fact_guard_block_threshold: 0.8  # score >= ini → peringatan keras
 
 # ── Memory Viewer ─────────────────────────────────────────────────────────────
 # Web UI: http://localhost:37777

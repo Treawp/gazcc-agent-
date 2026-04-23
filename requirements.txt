@@ -8,6 +8,15 @@ upstash-redis>=1.1.0
 python-dotenv>=1.0.1
 Pillow>=10.0.0
 
+# Python AI Tools Pack (32 tools)
+pandas>=2.0.0            # excel_parse, csv_transform, data_clean
+openpyxl>=3.1.0          # excel_parse, csv_transform (Excel output)
+pypdf>=4.0.0             # pdf_merge
+qrcode[pil]>=7.4.2       # qr_code_generate
+bcrypt>=4.0.0            # hash_verify (bcrypt mode)
+PyJWT>=2.8.0             # jwt_decode (signature verify)
+lxml>=5.0.0              # sitemap_parse (faster XML)
+
 # Extra Tools Pack
 matplotlib>=3.8.0        # DataVizTool
 python-whois>=0.9.4      # WhoisTool (fallback ke socket jika tidak ada)

@@ -8,10 +8,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Optional
+
+import httpx
 
 from .executor import StepExecutor
 from .memory import FileMemory, RedisMemory, TaskState, build_memory
@@ -160,6 +163,71 @@ class GazccAgent:
 
     # ── internals ─────────────────────────────────────────────────────────────
 
+    # ── simple query detection ─────────────────────────────────────────────────
+    _SIMPLE_PATTERNS = re.compile(
+        r"^("
+        r"(woi|hoi|hey|hai|halo|hello|hi|yo|oi|sup)\b"
+        r"|apa kabar|how are you|how r u|what'?s up|wassup|wazzup"
+        r"|siapa (kamu|lo|kau|anda|lu)|who are you"
+        r"|kamu (itu )?apa|what are you"
+        r"|nama (lo|kamu|mu)|your name"
+        r"|selamat (pagi|siang|sore|malam|datang)"
+        r"|good (morning|afternoon|evening|night)"
+        r"|terima kasih|makasih|thanks|thank you|thx"
+        r"|sama.sama|you.?re welcome|np|no prob"
+        r"|oke|ok|okay|iya|yes|yep|no|nope|nggak|ngga|gak|tidak"
+        r"|mantap|keren|bagus|nice|great|cool|gg|gud|good"
+        r"|bye|dadah|ciao|see ya"
+        r")\W*$",
+        re.I,
+    )
+
+    @staticmethod
+    def _is_simple_query(task: str) -> bool:
+        """Return True for short conversational messages that don't need ReAct planning."""
+        t = task.strip()
+        if len(t) > 120:
+            return False
+        # Contains tool-like keywords → needs full agent
+        _tool_keywords = re.compile(
+            r"\b(search|cari|google|browse|buka|buat|create|tulis|write|code|kode"
+            r"|analisa|analyze|hitung|calculate|download|upload|file|gambar|image"
+            r"|weather|cuaca|jadwal|schedule|github|git|sql|database|api|install"
+            r"|fix|perbaiki|debug|error|translate|terjemah|summarize|ringkas)\b",
+            re.I,
+        )
+        if _tool_keywords.search(t):
+            return False
+        return bool(GazccAgent._SIMPLE_PATTERNS.match(t)) or (len(t) <= 60 and "?" not in t and len(t.split()) <= 8)
+
+    async def _fast_reply(self, task: str) -> str:
+        """Single direct LLM call, no planning, no tools. For simple conversational messages."""
+        llm = self._llm_cfg
+        headers = {
+            "Authorization": f"Bearer {llm.get('api_key', '')}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://gazccai.vercel.app",
+            "X-Title": "GazccAI",
+        }
+        payload = {
+            "model": llm.get("model", "x-ai/grok-4.1-fast"),
+            "messages": [
+                {"role": "system", "content": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user."},
+                {"role": "user", "content": task},
+            ],
+            "max_tokens": 256,
+            "temperature": 0.7,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{llm.get('base_url', 'https://openrouter.ai/api/v1')}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            r.raise_for_status()
+            data = r.json()
+            return data["choices"][0]["message"]["content"].strip()
+
     async def _run_gen(self, task: str, task_id: str) -> AsyncIterator[AgentEvent]:
         self._events = []
         self._last_result = None
@@ -169,6 +237,21 @@ class GazccAgent:
         try:
             # ── 1. emit start ──────────────────────────────────────────────
             yield self._emit("task_start", {"task_id": task_id, "task": task})
+
+            # ── Fast-path: skip ReAct for simple conversational queries ────
+            if self._is_simple_query(task):
+                try:
+                    reply = await self._fast_reply(task)
+                    self._last_result = reply
+                    yield self._emit("task_done", {
+                        "output": reply,
+                        "elapsed": round(time.time() - start, 2),
+                        "steps_done": 0,
+                    })
+                    return
+                except Exception as e:
+                    _log.warning("fast_reply failed, falling back to full agent: %s", e)
+                    # fall through to full ReAct below
 
             # ── Init learning tracker for this task
             _tracker = self._learning.start_task(task_id, task)

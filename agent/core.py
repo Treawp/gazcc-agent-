@@ -33,6 +33,7 @@ from .skill_tools import register_skill_tools
 from .python_ai_tools import register_python_ai_tools
 from .new_tools import register_new_tools
 from .fact_guard import register_fact_guard, FactGuardInterceptor
+from .video_analyzer import register_video_tools
 from .learning import LearningSystem
 
 logger = logging.getLogger("gazcc.agent")
@@ -130,6 +131,7 @@ class GazccAgent:
         register_python_ai_tools(self._tools, self._cfg)
         register_new_tools(self._tools, self._cfg)
         register_fact_guard(self._tools, self._cfg)
+        register_video_tools(self._tools, self._cfg)
 
         self._fact_guard = FactGuardInterceptor(self._cfg)
 

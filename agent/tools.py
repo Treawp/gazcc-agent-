@@ -1894,7 +1894,7 @@ class DeepReasonTool(BaseTool):
     def __init__(self, llm_cfg: dict):
         self._cfg = llm_cfg
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "deepseek/deepseek-v4-flash")
+        self._model = llm_cfg.get("model", "qwen/qwen3.6-plus")
         self._api_key = llm_cfg.get("api_key", "")
 
     async def run(self, query: str) -> ToolResult:
@@ -1945,14 +1945,14 @@ class ClaudeReasonTool(BaseTool):
         "Input: pertanyaan atau deskripsi task yang butuh analisis tingkat tinggi. "
         "Optional: tentukan model lain dengan parameter model=."
     )
-    parameters = "query: str, model: str = 'deepseek/deepseek-v4-flash'"
+    parameters = "query: str, model: str = 'qwen/qwen3.6-plus'"
 
     def __init__(self, llm_cfg: dict):
         self._cfg = llm_cfg
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
         self._api_key = llm_cfg.get("api_key", "")
 
-    async def run(self, query: str, model: str = "deepseek/deepseek-v4-flash") -> ToolResult:
+    async def run(self, query: str, model: str = "qwen/qwen3.6-plus") -> ToolResult:
         if not query.strip():
             return ToolResult(False, "Error: query kosong")
         if not self._api_key:

@@ -219,7 +219,7 @@ class TokenCounterTool(BaseTool):
         limits = {
             "gpt-4o": 128000, "gpt-4o-mini": 128000,
             "claude-3-5-sonnet": 200000, "claude-3-haiku": 200000,
-            "deepseek-v4-flash": 1000000, "deepseek-v3": 64000,
+            "qwen3.6-plus": 1000000, "deepseek-v3": 64000,
             "gemini-2.0-flash": 1048576,
         }
         ctx = next((v for k, v in limits.items() if k in model.lower()), 32000)

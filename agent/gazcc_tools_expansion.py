@@ -1339,7 +1339,7 @@ class CodeTranslatorTool(BaseTool):
             )
 
             payload = {
-                "model":       "deepseek/deepseek-v4-flash",
+                "model":       "qwen/qwen3.6-plus",
                 "max_tokens":  4000,
                 "temperature": 0.1,
                 "messages": [

@@ -210,7 +210,7 @@ class GazccAgent:
             "X-Title": "GazccAI",
         }
         payload = {
-            "model": llm.get("model", "deepseek/deepseek-v4-flash"),
+            "model": llm.get("model", "qwen/qwen3.6-plus"),
             "messages": [
                 {"role": "system", "content": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user."},
                 {"role": "user", "content": task},

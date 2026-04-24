@@ -71,7 +71,7 @@ class _LLMToolBase(BaseTool):
         # Bisa override model khusus skill tools via config
         self._model = (
             tool_cfg.get("skill_tools_model", "")
-            or llm.get("model", "deepseek/deepseek-v4-flash")
+            or llm.get("model", "qwen/qwen3.6-plus")
         )
 
     async def _llm(

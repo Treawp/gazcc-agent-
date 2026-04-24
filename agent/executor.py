@@ -145,7 +145,7 @@ class StepExecutor:
         self._tools = tools
         self._retry_limit = retry_limit
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "deepseek/deepseek-v4-flash")
+        self._model = llm_cfg.get("model", "qwen/qwen3.6-plus")
         self._api_key = llm_cfg.get("api_key", "")
         self._fact_guard = FactGuardInterceptor(agent_cfg or {})
 

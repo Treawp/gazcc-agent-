@@ -183,7 +183,7 @@ class Planner:
         self._cfg = llm_cfg
         self._tool_schema = tool_schema
         self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "minimax/minimax-m2.7")
+        self._model = llm_cfg.get("model", "deepseek/deepseek-v4-flash")
         self._api_key = llm_cfg.get("api_key", "")
         self._memory_context = ""  # injected by agent from semantic memory
         self._learning_context = ""  # injected by agent from LearningSystem

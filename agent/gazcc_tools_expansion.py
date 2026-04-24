@@ -1339,7 +1339,7 @@ class CodeTranslatorTool(BaseTool):
             )
 
             payload = {
-                "model":       "minimax/minimax-m2.7",
+                "model":       "deepseek/deepseek-v4-flash",
                 "max_tokens":  4000,
                 "temperature": 0.1,
                 "messages": [

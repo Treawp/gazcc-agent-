@@ -203,7 +203,7 @@ async def run_task(req: TaskRequest):
         raise HTTPException(400, "task cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
     return StreamingResponse(
         _sse_gen(req.task, task_id),
@@ -388,7 +388,7 @@ async def sandbox_chat(req: SandboxRequest):
         raise HTTPException(400, "message cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
     session_id = req.session_id or str(uuid.uuid4())[:8]
 
@@ -576,18 +576,16 @@ async def proxy_chat(
     model: str = Query("", description="Model ID"),
 ):
     cfg_llm = CFG.get("llm", {})
-    api_key = key or cfg_llm.get("api_key", "") or os.environ.get("OPENROUTER_API_KEY", "")
+    api_key = key or cfg_llm.get("api_key", "") or os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "OPENROUTER_API_KEY not configured")
+        raise HTTPException(500, "GROQ_API_KEY not configured")
 
-    selected_model = model or cfg_llm.get("model", "deepseek/deepseek-v4-flash")
-    base_url = cfg_llm.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
+    selected_model = model or cfg_llm.get("model", "qwen/qwen3-32b")
+    base_url = cfg_llm.get("base_url", "https://api.groq.com/openai/v1").rstrip("/")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://gazccai.vercel.app",
-        "X-Title": "GazccAI",
     }
     payload = {
         "model": selected_model,

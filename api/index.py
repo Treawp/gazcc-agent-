@@ -203,7 +203,7 @@ async def run_task(req: TaskRequest):
         raise HTTPException(400, "task cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "GROQ_API_KEY not configured")
+        raise HTTPException(500, "COVENANT_API_KEY not configured")
 
     return StreamingResponse(
         _sse_gen(req.task, task_id),
@@ -388,7 +388,7 @@ async def sandbox_chat(req: SandboxRequest):
         raise HTTPException(400, "message cannot be empty")
     api_key = CFG.get("llm", {}).get("api_key", "")
     if not api_key:
-        raise HTTPException(500, "GROQ_API_KEY not configured")
+        raise HTTPException(500, "COVENANT_API_KEY not configured")
 
     session_id = req.session_id or str(uuid.uuid4())[:8]
 
@@ -564,48 +564,44 @@ document.getElementById('taskInput').addEventListener('keydown',e=>{if(e.key==='
 </html>"""
 
 
-# ── /api/proxy — OpenRouter chat proxy (dipanggil frontend) ───────────────────
+# ── /api/proxy — Covenant AI chat proxy (dipanggil frontend) ──────────────────
 
 import httpx as _httpx
+
+COVENANT_ENDPOINT = "https://api.covenant.sbs/api/ai/gemini"
 
 @app.get("/api/proxy")
 async def proxy_chat(
     question: str = Query(..., description="User message / full prompt"),
     system: str = Query("You are a helpful AI assistant.", description="System prompt"),
-    key: str = Query("", description="OpenRouter API key"),
-    model: str = Query("", description="Model ID"),
+    key: str = Query("", description="Covenant API key"),
+    model: str = Query("", description="Model ID (unused, fixed to gemini)"),
 ):
     cfg_llm = CFG.get("llm", {})
-    api_key = key or cfg_llm.get("api_key", "") or os.environ.get("GROQ_API_KEY", "")
+    api_key = key or cfg_llm.get("api_key", "") or os.environ.get("COVENANT_API_KEY", "")
     if not api_key:
-        raise HTTPException(500, "GROQ_API_KEY not configured")
-
-    selected_model = model or cfg_llm.get("model", "qwen/qwen3-32b")
-    base_url = cfg_llm.get("base_url", "https://api.groq.com/openai/v1").rstrip("/")
+        raise HTTPException(500, "COVENANT_API_KEY not configured")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "model": selected_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": question},
         ],
-        "max_tokens": 4000,
-        "temperature": 0.7,
     }
 
     try:
         async with _httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+            resp = await client.post(COVENANT_ENDPOINT, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            result = data["choices"][0]["message"]["content"]
+            result = data["data"]["result"]
             return JSONResponse({"status": True, "data": {"result": result}})
     except _httpx.HTTPStatusError as e:
-        return JSONResponse({"status": False, "message": f"OpenRouter HTTP {e.response.status_code}: {e.response.text[:200]}"})
+        return JSONResponse({"status": False, "message": f"Covenant HTTP {e.response.status_code}: {e.response.text[:200]}"})
     except Exception as e:
         return JSONResponse({"status": False, "message": str(e)})
 

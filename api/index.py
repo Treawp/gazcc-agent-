@@ -564,6 +564,34 @@ document.getElementById('taskInput').addEventListener('keydown',e=>{if(e.key==='
 </html>"""
 
 
+# ── /api/chat — Covenant AI POST proxy (dipanggil frontend, hindari CORS) ─────
+
+class _ChatReq(BaseModel):
+    messages: list[dict]
+
+@app.post("/api/chat")
+async def chat_proxy(req: _ChatReq):
+    """Frontend → POST /api/chat → backend → Covenant (server-side, no CORS)."""
+    cfg_llm = CFG.get("llm", {})
+    api_key = cfg_llm.get("api_key", "") or os.environ.get("COVENANT_API_KEY", "")
+    if not api_key:
+        return JSONResponse({"status": False, "message": "COVENANT_API_KEY not configured"}, status_code=500)
+
+    import httpx as _httpx2
+    try:
+        async with _httpx2.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                COVENANT_ENDPOINT,
+                json={"messages": req.messages},
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return JSONResponse({"status": True, "data": {"result": data["data"]["result"]}})
+    except Exception as e:
+        return JSONResponse({"status": False, "message": str(e)}, status_code=500)
+
+
 # ── /api/proxy — Covenant AI chat proxy (dipanggil frontend) ──────────────────
 
 import httpx as _httpx

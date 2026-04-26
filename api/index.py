@@ -566,6 +566,20 @@ document.getElementById('taskInput').addEventListener('keydown',e=>{if(e.key==='
 
 # ── /api/chat — Covenant AI POST proxy (dipanggil frontend, hindari CORS) ─────
 
+def _messages_to_covenant(messages: list[dict]) -> tuple[str, str]:
+    """Convert messages[] array → (question, system) untuk Covenant form-data."""
+    system = "Kamu adalah GazccAI, asisten AI yang cerdas dan membantu."
+    question = ""
+    for m in messages:
+        if m.get("role") == "system":
+            system = m.get("content", system)
+        elif m.get("role") == "user":
+            question = m.get("content", "")  # ambil yang terakhir
+    return question, system
+
+
+# ── /api/chat — Covenant AI POST proxy (dipanggil frontend, hindari CORS) ─────
+
 class _ChatReq(BaseModel):
     messages: list[dict]
 
@@ -577,13 +591,16 @@ async def chat_proxy(req: _ChatReq):
     if not api_key:
         return JSONResponse({"status": False, "message": "COVENANT_API_KEY not configured"}, status_code=500)
 
-    import httpx as _httpx2
+    question, system = _messages_to_covenant(req.messages)
+    if not question:
+        return JSONResponse({"status": False, "message": "question kosong"}, status_code=400)
+
     try:
-        async with _httpx2.AsyncClient(timeout=120) as client:
+        async with _httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 COVENANT_ENDPOINT,
-                json={"messages": req.messages},
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                headers={"x-api-key": api_key},
+                data={"question": question, "system": system, "sessionId": str(uuid.uuid4())[:8]},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -610,20 +627,13 @@ async def proxy_chat(
     if not api_key:
         raise HTTPException(500, "COVENANT_API_KEY not configured")
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": question},
-        ],
-    }
-
     try:
         async with _httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(COVENANT_ENDPOINT, json=payload, headers=headers)
+            resp = await client.post(
+                COVENANT_ENDPOINT,
+                headers={"x-api-key": api_key},
+                data={"question": question, "system": system, "sessionId": str(uuid.uuid4())[:8]},
+            )
             resp.raise_for_status()
             data = resp.json()
             result = data["data"]["result"]

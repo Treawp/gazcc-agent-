@@ -8,6 +8,7 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from typing import Any, Optional
 
 import httpx
@@ -271,16 +272,23 @@ class StepExecutor:
         return False, "Max ReAct turns reached without completion."
 
     async def _call_llm(self, messages: list[dict], retry: int = 0, on_event=None) -> str:
-        """Call Covenant LLM API."""
+        """Call Covenant LLM API (form-data format)."""
         url = self._base_url.rstrip('/')
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {"messages": messages}
+        # Konversi messages[] → question + system (format Covenant)
+        system = "Kamu adalah GazccAI, AI agent cerdas yang menyelesaikan task secara terstruktur."
+        question = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system = m.get("content", system)
+            elif m.get("role") == "user":
+                question = m.get("content", "")
         try:
             async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=payload, headers=headers)
+                resp = await client.post(
+                    url,
+                    headers={"x-api-key": self._api_key},
+                    data={"question": question, "system": system, "sessionId": str(uuid.uuid4())[:8]},
+                )
                 resp.raise_for_status()
                 data = resp.json()
             return data["data"]["result"] or ""

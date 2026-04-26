@@ -205,23 +205,16 @@ class GazccAgent:
     async def _fast_reply(self, task: str) -> str:
         """Single direct LLM call, no planning, no tools. For simple conversational messages."""
         llm = self._llm_cfg
-        headers = {
-            "Authorization": f"Bearer {llm.get('api_key', '')}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://gazccai.vercel.app",
-            "X-Title": "GazccAI",
-        }
-        payload = {
-            "messages": [
-                {"role": "system", "content": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user."},
-                {"role": "user", "content": task},
-            ],
-        }
+        api_key = llm.get('api_key', '') or os.environ.get("COVENANT_API_KEY", "")
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
                 llm.get('base_url', 'https://api.covenant.sbs/api/ai/gemini'),
-                headers=headers,
-                json=payload,
+                headers={"x-api-key": api_key},
+                data={
+                    "question": task,
+                    "system": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user.",
+                    "sessionId": str(uuid.uuid4())[:8],
+                },
             )
             r.raise_for_status()
             data = r.json()

@@ -6,6 +6,7 @@ Uses the same LLM as the agent but in a structured planning call.
 
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -224,17 +225,14 @@ class Planner:
         return []
 
     async def _call_llm(self, prompt: str) -> str:
-        # Covenant API: POST full endpoint URL
+        # Covenant API: form-data format
         url = self._base_url.rstrip('/')
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "messages": [{"role": "user", "content": prompt}],
-        }
         async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(url, json=payload, headers=headers)
+            resp = await client.post(
+                url,
+                headers={"x-api-key": self._api_key},
+                data={"question": prompt, "system": "Kamu adalah AI planner yang membuat rencana eksekusi task secara terstruktur.", "sessionId": str(uuid.uuid4())[:8]},
+            )
             resp.raise_for_status()
             data = resp.json()
             return data["data"]["result"]

@@ -212,23 +212,20 @@ class GazccAgent:
             "X-Title": "GazccAI",
         }
         payload = {
-            "model": llm.get("model", "qwen/qwen3.6-plus"),
             "messages": [
                 {"role": "system", "content": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user."},
                 {"role": "user", "content": task},
             ],
-            "max_tokens": 256,
-            "temperature": 0.7,
         }
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.post(
-                f"{llm.get('base_url', 'https://openrouter.ai/api/v1')}/chat/completions",
+                llm.get('base_url', 'https://api.covenant.sbs/api/ai/gemini'),
                 headers=headers,
                 json=payload,
             )
             r.raise_for_status()
             data = r.json()
-            return data["choices"][0]["message"]["content"].strip()
+            return data["data"]["result"].strip()
 
     async def _run_gen(self, task: str, task_id: str) -> AsyncIterator[AgentEvent]:
         self._events = []

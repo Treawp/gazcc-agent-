@@ -182,8 +182,8 @@ class Planner:
     def __init__(self, llm_cfg: dict, tool_schema: str):
         self._cfg = llm_cfg
         self._tool_schema = tool_schema
-        self._base_url = llm_cfg.get("base_url", "https://openrouter.ai/api/v1")
-        self._model = llm_cfg.get("model", "qwen/qwen3.6-plus")
+        self._base_url = llm_cfg.get("base_url", "https://api.covenant.sbs/api/ai/gemini")
+        self._model = llm_cfg.get("model", "gemini")
         self._api_key = llm_cfg.get("api_key", "")
         self._memory_context = ""  # injected by agent from semantic memory
         self._learning_context = ""  # injected by agent from LearningSystem
@@ -224,25 +224,20 @@ class Planner:
         return []
 
     async def _call_llm(self, prompt: str) -> str:
-        # OpenRouter API: POST /v1/chat/completions (OpenAI-compatible)
-        url = f"{self._base_url.rstrip('/')}/chat/completions"
+        # Covenant API: POST full endpoint URL
+        url = self._base_url.rstrip('/')
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/gazcc",
-            "X-Title": "GazccThinking",
         }
         payload = {
-            "model": self._model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4000,
-            "temperature": 0.1,
         }
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            return data["data"]["result"]
 
     def _parse_plan(self, task: str, raw: str) -> Plan:
         # Strip markdown fences if present

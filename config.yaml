@@ -1,8 +1,8 @@
 llm:
-  provider: groq
-  base_url: https://api.groq.com/openai/v1
-  model: qwen/qwen3-32b
-  api_key: ${GROQ_API_KEY}
+  provider: covenant
+  base_url: https://api.covenant.sbs/api/ai/gemini
+  model: gemini
+  api_key: ${COVENANT_API_KEY}
   max_tokens: 4000
   temperature: 0.1
 

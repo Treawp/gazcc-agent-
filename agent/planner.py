@@ -231,7 +231,11 @@ class Planner:
             resp = await client.post(
                 url,
                 headers={"x-api-key": self._api_key},
-                data={"question": prompt, "system": "Kamu adalah AI planner yang membuat rencana eksekusi task secara terstruktur.", "sessionId": str(uuid.uuid4())[:8]},
+                files=[
+                    ("question", (None, prompt)),
+                    ("system", (None, "Kamu adalah AI planner yang membuat rencana eksekusi task secara terstruktur.")),
+                    ("sessionId", (None, str(uuid.uuid4())[:8])),
+                ],
             )
             resp.raise_for_status()
             data = resp.json()

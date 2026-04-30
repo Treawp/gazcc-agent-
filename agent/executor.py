@@ -287,7 +287,11 @@ class StepExecutor:
                 resp = await client.post(
                     url,
                     headers={"x-api-key": self._api_key},
-                    data={"question": question, "system": system, "sessionId": str(uuid.uuid4())[:8]},
+                    files=[
+                        ("question", (None, question)),
+                        ("system", (None, system)),
+                        ("sessionId", (None, str(uuid.uuid4())[:8])),
+                    ],
                 )
                 resp.raise_for_status()
                 data = resp.json()

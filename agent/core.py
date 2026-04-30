@@ -210,11 +210,11 @@ class GazccAgent:
             r = await client.post(
                 llm.get('base_url', 'https://api.covenant.sbs/api/ai/gemini'),
                 headers={"x-api-key": api_key},
-                data={
-                    "question": task,
-                    "system": "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user.",
-                    "sessionId": str(uuid.uuid4())[:8],
-                },
+                files=[
+                    ("question", (None, task)),
+                    ("system", (None, "Kamu adalah GazccAI, asisten AI cerdas dan responsif. Jawab singkat dan natural dalam bahasa yang dipakai user.")),
+                    ("sessionId", (None, str(uuid.uuid4())[:8])),
+                ],
             )
             r.raise_for_status()
             data = r.json()
